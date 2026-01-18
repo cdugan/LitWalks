@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LitWalks - Safe Walking Route Finder</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>🚶 LitWalks</h1>
+                <p>Find the safest walking routes in your city</p>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main">
+            <!-- Sidebar with Controls -->
+            <aside class="sidebar">
+                <div class="controls-panel">
+                    <h2>Route Comparison</h2>
+                    
+                    <div class="input-group">
+                        <label for="startInput">Starting Point</label>
+                        <input type="text" id="startInput" placeholder="Address or click map" />
+                        <button id="startMapBtn" class="map-btn" title="Click on map">📍</button>
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="endInput">Destination</label>
+                        <input type="text" id="endInput" placeholder="Address or click map" />
+                        <button id="endMapBtn" class="map-btn" title="Click on map">📍</button>
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="departureTimeInput">Departure Time</label>
+                        <input type="datetime-local" id="departureTimeInput" />
+                        <button id="currentTimeBtn" class="map-btn" title="Use current time">Now</button>
+                    </div>
+                    
+                    <button id="computeBtn" class="primary-btn">� Find Safe Walking Route</button>
+                    
+                    <!-- Map Layers -->
+                    <div class="map-layers">
+                        <h3>Map Layers</h3>
+                        <div class="layer-toggle">
+                            <input type="checkbox" id="streetlightsToggle" checked>
+                            <label for="streetlightsToggle">💡 Streetlights</label>
+                        </div>
+                        <div class="layer-toggle">
+                            <input type="checkbox" id="sidewalksToggle" checked>
+                            <label for="sidewalksToggle">🚶 Sidewalk Coverage</label>
+                        </div>
+                        <div class="layer-toggle">
+                            <input type="checkbox" id="businessesToggle" checked>
+                            <label for="businessesToggle">🏪 Open Businesses</label>
+                        </div>
+                    </div>
+                    
+                    <div id="loadingIndicator" class="loading" style="display: none;">
+                        Computing routes...
+                    </div>
+                    
+                    <!-- Results -->
+                    <div id="resultsPanel" class="results-panel" style="display: none;">
+                        <h3>Recommended Walking Route</h3>
+                        
+                        <div class="route-result safest-result">
+                            <h4>🛡️ Safe Route</h4>
+                            <div class="metric">
+                                <span class="label">Distance:</span>
+                                <span class="value" id="routeDistance">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Walking Time:</span>
+                                <span class="value" id="routeTime">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Safety Score:</span>
+                                <span class="value" id="routeSafety">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Streetlights:</span>
+                                <span class="value" id="routeLighting">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Sidewalk Coverage:</span>
+                                <span class="value" id="routeSidewalk">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Nearby Businesses:</span>
+                                <span class="value" id="routeBusiness">-</span>
+                            </div>
+                        </div>
+                        
+                        <button id="clearBtn" class="secondary-btn">Clear Results</button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Map -->
+            <div id="map" class="map">
+                <div id="mapLoader" class="map-loader">Loading map data…</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    
+    <!-- Pass config from backend to frontend -->
+    <script>
+        // Set BBOX from backend configuration
+        window.APP_BBOX = {{ bbox | tojson }};
+    </script>
+    
+    <!-- Custom JS -->
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

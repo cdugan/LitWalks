@@ -1,0 +1,13 @@
+- what does safety score mean?
+
+- layers option to see different safety data?
+
+- Address autocomplete?
+
+
+
+Add data from:
+- Accident database - roads with higher density (accidents per daily traffic) of accidents are more dangerous. 
+? Should we pair the curvature rating with a high speed rating?
+
+

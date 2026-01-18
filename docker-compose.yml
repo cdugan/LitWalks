@@ -1,0 +1,22 @@
+# LitRoutes - Safe Route Visualization Web App
+
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+    volumes:
+      - ./cache:/app/cache
+      - ./duke_cache.json:/app/duke_cache.json
+      - ./mapillary_cache.json:/app/mapillary_cache.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
