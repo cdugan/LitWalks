@@ -373,12 +373,17 @@ def build_safe_graph(bbox):
                 data['light_count'] = 0
 
     # Add basic travel metrics to projected graph
-    print("   Adding speeds/travel times to projected graph...")
-    # For walking routes, use walking speed instead of driving speed
-    # Average walking speed is about 5 km/h (3.1 mph)
+    print("   Adding walking speeds/travel times to projected graph...")
+    # For walking routes, use walking speed (5 km/h = 3.1 mph average walking pace)
     WALKING_SPEED_KMH = 5.0
-    G_proj = add_edge_speeds(G_proj, fallback=WALKING_SPEED_KMH)
-    G_proj = add_edge_travel_times(G_proj)
+    
+    # Manually set walking speed on all edges
+    for u, v, k, data in G_proj.edges(keys=True, data=True):
+        data['speed_kph'] = WALKING_SPEED_KMH
+        # Calculate travel time based on walking speed
+        length_km = data.get('length', 0) / 1000.0  # convert meters to km
+        data['travel_time'] = (length_km / WALKING_SPEED_KMH) * 3600  # time in seconds
+    
     mem_after_speeds = _get_mem_mb()
     print(f"   ✓ Walking speeds/times added (5 km/h) [mem: {mem_after_speeds:.1f} MB]")
 
