@@ -355,24 +355,34 @@ def fetch_open_businesses(bbox, current_time=None):
     
     north, south, east, west = bbox
     
-    # Overpass QL query for amenities/shops that typically have business hours
-    query = f"""
-    [bbox:{south},{west},{north},{east}];
-    (
-      node["amenity"~"cafe|restaurant|bar|pub|shop|bank|library|gym|pharmacy"]["opening_hours"];
-      way["amenity"~"cafe|restaurant|bar|pub|shop|bank|library|gym|pharmacy"]["opening_hours"];
-      node["shop"];
-      way["shop"];
-    );
-    out body;
+    # Overpass QL query for amenities/shops - simplified query for better reliability
+    query = f"""[bbox:{south},{west},{north},{east}];
+node["amenity"~"cafe|restaurant|shop|bank"];
+out center;
     """
     
-    try:
-        response = requests.post(OVERPASS_URL, data=query, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as e:
-        print(f"   ⚠️ Overpass API error for businesses: {e}")
+    # Retry logic for Overpass API (it's often overloaded)
+    max_retries = 3
+    retry_delay = 2
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(OVERPASS_URL, data=query, timeout=60)
+            response.raise_for_status()
+            if response.text.strip():  # Check if response has content
+                data = response.json()
+                break
+            else:
+                raise ValueError("Empty response from Overpass API")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"   ⚠️ Overpass API error (attempt {attempt + 1}/{max_retries}): {e}")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print(f"   ⚠️ Overpass API failed after {max_retries} attempts: {e}")
+                return []
+    else:
+        print(f"   ⚠️ Overpass API timeout after {max_retries} attempts")
         return []
     
     businesses = []
@@ -423,23 +433,34 @@ def fetch_sidewalk_coverage(bbox):
     
     north, south, east, west = bbox
     
-    # Overpass QL query for ways with sidewalk information
-    query = f"""
-    [bbox:{south},{west},{north},{east}];
-    (
-      way["highway"]["sidewalk"];
-      way["footway"];
-      way["path"]["foot"="yes"];
-    );
-    out body geom;
+    # Overpass QL query for ways with sidewalk information - simplified query
+    query = f"""[bbox:{south},{west},{north},{east}];
+way["highway"]["sidewalk"];
+out body;
     """
     
-    try:
-        response = requests.post(OVERPASS_URL, data=query, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as e:
-        print(f"   ⚠️ Overpass API error for sidewalks: {e}")
+    # Retry logic for Overpass API (it's often overloaded)
+    max_retries = 3
+    retry_delay = 2
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(OVERPASS_URL, data=query, timeout=60)
+            response.raise_for_status()
+            if response.text.strip():  # Check if response has content
+                data = response.json()
+                break
+            else:
+                raise ValueError("Empty response from Overpass API")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"   ⚠️ Overpass API error (attempt {attempt + 1}/{max_retries}): {e}")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print(f"   ⚠️ Overpass API failed after {max_retries} attempts: {e}")
+                return {}
+    else:
+        print(f"   ⚠️ Overpass API timeout after {max_retries} attempts")
         return {}
     
     sidewalk_info = {}

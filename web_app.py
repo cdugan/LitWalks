@@ -513,11 +513,107 @@ def api_graph_summary():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
+    """Calculate walking-specific metrics for a route.
+    
+    Args:
+        route_nodes: List of node IDs forming the route
+        G: NetworkX graph
+        lights: List of streetlight locations [(lat, lon), ...]
+        bbox: Bounding box tuple (north, south, east, west)
+    
+    Returns:
+        Dict with lighting_score, sidewalk_coverage, nearby_businesses
+    """
+    metrics = {
+        "lighting_score": None,
+        "sidewalk_coverage": None,
+        "nearby_businesses": None
+    }
+    
+    if not route_nodes or len(route_nodes) < 2:
+        return metrics
+    
+    try:
+        # Calculate lighting score (percentage of segments with nearby streetlights)
+        lit_segments = 0
+        total_segments = len(route_nodes) - 1
+        
+        if total_segments > 0:
+            for i in range(len(route_nodes) - 1):
+                node1 = route_nodes[i]
+                node2 = route_nodes[i + 1]
+                
+                # Get node coordinates
+                lat1, lon1 = G.nodes[node1]['y'], G.nodes[node1]['x']
+                lat2, lon2 = G.nodes[node2]['y'], G.nodes[node2]['x']
+                
+                # Check if any streetlights are near this segment (within ~100 meters)
+                segment_midpoint_lat = (lat1 + lat2) / 2
+                segment_midpoint_lon = (lon1 + lon2) / 2
+                
+                has_light = False
+                for light_lat, light_lon in lights:
+                    # Simple distance check (~0.001 degrees ≈ 111 meters)
+                    dist = ((light_lat - segment_midpoint_lat) ** 2 + (light_lon - segment_midpoint_lon) ** 2) ** 0.5
+                    if dist < 0.001:  # ~111 meters
+                        has_light = True
+                        break
+                
+                if has_light:
+                    lit_segments += 1
+            
+            metrics["lighting_score"] = round((lit_segments / total_segments) * 100, 1)
+        
+        # Calculate sidewalk coverage (from edge data)
+        sidewalk_segments = 0
+        if total_segments > 0:
+            for i in range(len(route_nodes) - 1):
+                node1 = route_nodes[i]
+                node2 = route_nodes[i + 1]
+                
+                try:
+                    # Handle MultiGraph edges - access edge 0
+                    edge_data = G.edges[node1, node2, 0]
+                    if 'sidewalk_score' in edge_data:
+                        sidewalk_score = edge_data['sidewalk_score']
+                        if sidewalk_score and sidewalk_score > 0:
+                            sidewalk_segments += 1
+                except:
+                    pass
+            
+            metrics["sidewalk_coverage"] = round((sidewalk_segments / total_segments) * 100, 1)
+        
+        # Count nearby businesses along route segments
+        nearby_businesses = 0
+        for i in range(len(route_nodes) - 1):
+            node1 = route_nodes[i]
+            node2 = route_nodes[i + 1]
+            try:
+                edge_data = G.edges[node1, node2, 0]
+                if 'business_score' in edge_data:
+                    biz_score = edge_data['business_score']
+                    if biz_score and biz_score > 0:
+                        nearby_businesses += 1
+            except:
+                pass
+        
+        metrics["nearby_businesses"] = nearby_businesses
+        
+    except Exception as e:
+        print(f"Warning: Could not calculate walking metrics: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return metrics
+
+
 @app.route('/api/routes', methods=['POST'])
 def api_routes():
     """Compute and return safest walking routes.
     
     For walking routes, we primarily return the safest route with features like:
+
     - Streetlight coverage
     - Sidewalk availability  
     - Proximity to open businesses
@@ -587,7 +683,10 @@ def api_routes():
             "distance_m": 0,
             "travel_time_s": 0,
             "avg_speed_kmh": 0,
-            "safety_score": 0
+            "safety_score": 0,
+            "lighting_score": None,
+            "sidewalk_coverage": None,
+            "nearby_businesses": None
         }
         
         safest_route = None
@@ -595,7 +694,10 @@ def api_routes():
             "nodes": [],
             "distance_m": 0,
             "travel_time_s": 0,
-            "safety_score": 0
+            "safety_score": 0,
+            "lighting_score": None,
+            "sidewalk_coverage": None,
+            "nearby_businesses": None
         }
         
         # Helper: normalize edge data from MultiGraph (may be nested dict) to flat dict
@@ -689,9 +791,21 @@ def api_routes():
         except nx.NetworkXNoPath:
             print("  No path found!")
         
+        # Calculate walking metrics for both routes
+        if fastest_route:
+            fastest_metrics = calculate_route_walking_metrics(fastest_route, G, lights, BBOX)
+            fastest_data.update(fastest_metrics)
+        
+        if safest_route:
+            safest_metrics = calculate_route_walking_metrics(safest_route, G, lights, BBOX)
+            safest_data.update(safest_metrics)
+        
         # Convert routes to GeoJSON
         fastest_geojson = route_to_geojson(fastest_route, G, "fastest") if fastest_route else None
         safest_geojson = route_to_geojson(safest_route, G, "safest") if safest_route else None
+        
+        print(f"  fastest_route nodes: {len(fastest_route) if fastest_route else 0}, geojson: {fastest_geojson is not None}")
+        print(f"  safest_route nodes: {len(safest_route) if safest_route else 0}, geojson: {safest_geojson is not None}")
         
         response = {
             "status": "success",

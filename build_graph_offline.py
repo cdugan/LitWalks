@@ -18,10 +18,9 @@ KEEP_ATTRS = {
     'travel_time',        # For routing weight
     'safety_score',       # For safety visualization
     'light_count',        # For debug visualization
-    'curve_score',        # For component breakdown
     'darkness_score',     # For component breakdown
-    'highway_risk',       # For component breakdown
-    'highway_tag',        # For road type display
+    'sidewalk_score',     # For walking metrics
+    'business_score',     # For walking metrics
     'land_risk',          # For component breakdown
     'land_label',         # For component breakdown
     'speed_kph',          # For reference

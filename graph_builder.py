@@ -27,6 +27,10 @@ except Exception:
 # --- GLOBAL INPUTS ---
 # BBOX is defined in config.py and imported above
 
+# Optional: Skip Overpass API calls if they're unreliable
+# Set SKIP_OVERPASS=1 to disable sidewalk and business data fetching
+SKIP_OVERPASS = os.environ.get('SKIP_OVERPASS', '0') == '1'
+
 # --- SAFETY SCORING PARAMS FOR WALKING ROUTES ---
 # For walking, we prioritize: darkness, sidewalk availability, proximity to open businesses, and land use
 # safety = w_darkness*darkness_score + w_sidewalk*sidewalk_score + w_business*business_score + w_land*land_risk
@@ -370,10 +374,13 @@ def build_safe_graph(bbox):
 
     # Add basic travel metrics to projected graph
     print("   Adding speeds/travel times to projected graph...")
-    G_proj = add_edge_speeds(G_proj)
+    # For walking routes, use walking speed instead of driving speed
+    # Average walking speed is about 5 km/h (3.1 mph)
+    WALKING_SPEED_KMH = 5.0
+    G_proj = add_edge_speeds(G_proj, fallback=WALKING_SPEED_KMH)
     G_proj = add_edge_travel_times(G_proj)
     mem_after_speeds = _get_mem_mb()
-    print(f"   ✓ Speeds/times added [mem: {mem_after_speeds:.1f} MB]")
+    print(f"   ✓ Walking speeds/times added (5 km/h) [mem: {mem_after_speeds:.1f} MB]")
 
     # Fetch NLCD raster once for bbox
     print("   Fetching NLCD land cover raster for bbox once...")
@@ -396,14 +403,20 @@ def build_safe_graph(bbox):
             transformer_to_latlon = None
 
     # Fetch sidewalk coverage for the bbox
-    print("   Fetching sidewalk coverage data...")
-    sidewalk_data = fetch_sidewalk_coverage(bbox)
-    print(f"   ✓ Sidewalk data fetched for {len(sidewalk_data)} ways")
+    sidewalk_data = {}
+    if not SKIP_OVERPASS:
+        print("   Fetching sidewalk coverage data...")
+        sidewalk_data = fetch_sidewalk_coverage(bbox)
+        print(f"   ✓ Sidewalk data fetched for {len(sidewalk_data)} ways")
+    else:
+        print("   ⊘ Skipping Overpass API (SKIP_OVERPASS=1)")
     
     # Fetch open businesses for the bbox
-    print("   Fetching nearby open businesses...")
-    businesses = fetch_open_businesses(bbox)
-    print(f"   ✓ Found {len(businesses)} open businesses")
+    businesses = []
+    if not SKIP_OVERPASS:
+        print("   Fetching nearby open businesses...")
+        businesses = fetch_open_businesses(bbox)
+        print(f"   ✓ Found {len(businesses)} open businesses")
     
     # Build a spatial index of businesses for proximity scoring (simple approach)
     business_locations = set()

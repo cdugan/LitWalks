@@ -370,6 +370,10 @@ async function computeRoutes() {
         
         const data = await response.json();
         
+        console.log('Route response data:', data);
+        console.log('Fastest route geojson:', data.fastest?.geojson);
+        console.log('Safest route geojson:', data.safest?.geojson);
+        
         if (data.status === 'success') {
             // Set markers (they have bounds validation built in)
             // Pass true to preserve original input text (address or coordinates)
@@ -385,8 +389,9 @@ async function computeRoutes() {
             if (fastestRouteLayer) map.removeLayer(fastestRouteLayer);
             if (safestRouteLayer) map.removeLayer(safestRouteLayer);
             
-            // Add recommended walking route (safest route for pedestrians)
-            if (data.safest.geojson) {
+            // Add routes with different colors
+            // Safest route: cyan, solid
+            if (data.safest?.geojson) {
                 const halo = L.geoJSON(data.safest.geojson, {
                     style: {
                         color: '#ffffff',
@@ -394,23 +399,26 @@ async function computeRoutes() {
                         opacity: 0.9
                     }
                 });
-                const routeLine = L.geoJSON(data.safest.geojson, {
+                const cyanLine = L.geoJSON(data.safest.geojson, {
                     style: {
-                        color: '#00FF00',
+                        color: '#00FFFF',
                         weight: 6,
                         opacity: 0.9
                     }
-                }).bindPopup('<b>🛡️ Recommended Walking Route</b>');
-                safestRouteLayer = L.layerGroup([halo, routeLine]).addTo(map);
-            } else if (data.fastest && data.fastest.geojson) {
-                // Fallback: if safest is not available, use fastest/primary route
+                }).bindPopup('<b>🛡️ Safest Route</b>');
+                safestRouteLayer = L.layerGroup([halo, cyanLine]).addTo(map);
+            }
+
+            // Fastest route: magenta, dashed
+            if (data.fastest?.geojson) {
                 fastestRouteLayer = L.geoJSON(data.fastest.geojson, {
                     style: {
-                        color: '#00FF00',
-                        weight: 6,
-                        opacity: 0.9
+                        color: '#FF00FF',
+                        weight: 4,
+                        opacity: 1.0,
+                        dashArray: '8,6'
                     }
-                }).addTo(map).bindPopup('<b>🛡️ Walking Route</b>');
+                }).addTo(map).bindPopup('<b>⚡ Fastest Route</b>');
             }
             
             // Display results (walking route)
@@ -498,33 +506,45 @@ function parseInput(input) {
 // Display results
 function displayResults(fastestData, safestData) {
     const resultsPanel = document.getElementById('resultsPanel');
+    const safestRouteCard = document.getElementById('safestRouteCard');
+    const fastestRouteCard = document.getElementById('fastestRouteCard');
     
-    // For walking routes, we primarily show the safest route
-    // If only one route is provided (recommended walking route), use it
-    const routeData = safestData || fastestData;
-    
-    if (routeData && routeData.distance_m > 0) {
-        document.getElementById('routeDistance').textContent = 
-            (routeData.distance_m / 1609.34).toFixed(2) + ' mi';
-        document.getElementById('routeTime').textContent = 
-            formatTime(routeData.travel_time_s);
-        document.getElementById('routeSafety').textContent = 
-            routeData.safety_score.toFixed(1);
-        
-        // Display walking-specific metrics if available
-        document.getElementById('routeLighting').textContent = 
-            routeData.lighting_score ? routeData.lighting_score.toFixed(1) + '%' : 'N/A';
-        document.getElementById('routeSidewalk').textContent = 
-            routeData.sidewalk_coverage ? routeData.sidewalk_coverage.toFixed(1) + '%' : 'N/A';
-        document.getElementById('routeBusiness').textContent = 
-            routeData.nearby_businesses ? routeData.nearby_businesses.toString() : 'N/A';
+    // Display safest route
+    if (safestData && safestData.distance_m > 0) {
+        document.getElementById('safeDistance').textContent = 
+            (safestData.distance_m / 1609.34).toFixed(2) + ' mi';
+        document.getElementById('safeTime').textContent = 
+            formatTime(safestData.travel_time_s);
+        document.getElementById('safeSafety').textContent = 
+            safestData.safety_score.toFixed(1);
+        document.getElementById('safeLighting').textContent = 
+            safestData.lighting_score ? safestData.lighting_score.toFixed(1) + '%' : 'N/A';
+        document.getElementById('safeSidewalk').textContent = 
+            safestData.sidewalk_coverage ? safestData.sidewalk_coverage.toFixed(1) + '%' : 'N/A';
+        document.getElementById('safeBusiness').textContent = 
+            safestData.nearby_businesses ? safestData.nearby_businesses.toString() : 'N/A';
+        safestRouteCard.style.display = 'block';
     } else {
-        document.getElementById('routeDistance').textContent = 'N/A';
-        document.getElementById('routeTime').textContent = 'N/A';
-        document.getElementById('routeSafety').textContent = 'N/A';
-        document.getElementById('routeLighting').textContent = 'N/A';
-        document.getElementById('routeSidewalk').textContent = 'N/A';
-        document.getElementById('routeBusiness').textContent = 'N/A';
+        safestRouteCard.style.display = 'none';
+    }
+    
+    // Display fastest route
+    if (fastestData && fastestData.distance_m > 0) {
+        document.getElementById('fastDistance').textContent = 
+            (fastestData.distance_m / 1609.34).toFixed(2) + ' mi';
+        document.getElementById('fastTime').textContent = 
+            formatTime(fastestData.travel_time_s);
+        document.getElementById('fastSafety').textContent = 
+            fastestData.safety_score.toFixed(1);
+        document.getElementById('fastLighting').textContent = 
+            fastestData.lighting_score ? fastestData.lighting_score.toFixed(1) + '%' : 'N/A';
+        document.getElementById('fastSidewalk').textContent = 
+            fastestData.sidewalk_coverage ? fastestData.sidewalk_coverage.toFixed(1) + '%' : 'N/A';
+        document.getElementById('fastBusiness').textContent = 
+            fastestData.nearby_businesses ? fastestData.nearby_businesses.toString() : 'N/A';
+        fastestRouteCard.style.display = 'block';
+    } else {
+        fastestRouteCard.style.display = 'none';
     }
     
     resultsPanel.style.display = 'block';

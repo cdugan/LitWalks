@@ -71,33 +71,66 @@
                     
                     <!-- Results -->
                     <div id="resultsPanel" class="results-panel" style="display: none;">
-                        <h3>Recommended Walking Route</h3>
+                        <h3>🛡️ Walking Routes</h3>
+                        <p style="font-size: 0.9em; color: #666; margin: 5px 0 10px 0;">
+                            Cyan Solid = Safe Route | Magenta Dashed = Fastest Route
+                        </p>
                         
-                        <div class="route-result safest-result">
-                            <h4>🛡️ Safe Route</h4>
+                        <!-- Safest Route Card -->
+                        <div class="route-result safest-result" id="safestRouteCard" style="display: none;">
+                            <h4>✓ Safe Route (Recommended)</h4>
                             <div class="metric">
                                 <span class="label">Distance:</span>
-                                <span class="value" id="routeDistance">-</span>
+                                <span class="value" id="safeDistance">-</span>
                             </div>
                             <div class="metric">
                                 <span class="label">Walking Time:</span>
-                                <span class="value" id="routeTime">-</span>
+                                <span class="value" id="safeTime">-</span>
                             </div>
                             <div class="metric">
                                 <span class="label">Safety Score:</span>
-                                <span class="value" id="routeSafety">-</span>
+                                <span class="value" id="safeSafety">-</span>
                             </div>
                             <div class="metric">
                                 <span class="label">Streetlights:</span>
-                                <span class="value" id="routeLighting">-</span>
+                                <span class="value" id="safeLighting">-</span>
                             </div>
                             <div class="metric">
                                 <span class="label">Sidewalk Coverage:</span>
-                                <span class="value" id="routeSidewalk">-</span>
+                                <span class="value" id="safeSidewalk">-</span>
                             </div>
                             <div class="metric">
                                 <span class="label">Nearby Businesses:</span>
-                                <span class="value" id="routeBusiness">-</span>
+                                <span class="value" id="safeBusiness">-</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Fastest Route Card -->
+                        <div class="route-result fastest-result" id="fastestRouteCard" style="display: none;">
+                            <h4>⚡ Fastest Route (Alternative)</h4>
+                            <div class="metric">
+                                <span class="label">Distance:</span>
+                                <span class="value" id="fastDistance">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Walking Time:</span>
+                                <span class="value" id="fastTime">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Safety Score:</span>
+                                <span class="value" id="fastSafety">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Streetlights:</span>
+                                <span class="value" id="fastLighting">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Sidewalk Coverage:</span>
+                                <span class="value" id="fastSidewalk">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">Nearby Businesses:</span>
+                                <span class="value" id="fastBusiness">-</span>
                             </div>
                         </div>
                         
