@@ -513,6 +513,92 @@ def api_graph_summary():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/api/sidewalks', methods=['GET'])
+def api_sidewalks():
+    """Return GeoJSON of streets with explicit sidewalk data from OSM."""
+    try:
+        G, lights = _get_graph()
+        
+        features = []
+        for u, v, k, data in G.edges(keys=True, data=True):
+            # Only show sidewalks with explicit OSM tags
+            has_explicit = data.get('has_explicit_sidewalk', False)
+            sidewalk_score = data.get('sidewalk_score', 0.5)
+            
+            # Only include edges with explicit sidewalk data AND good sidewalk scores
+            if has_explicit and sidewalk_score >= 0.8:
+                # Get edge geometry or fallback to node coordinates
+                geom = data.get('geometry')
+                if geom:
+                    coords = [[x, y] for x, y in geom.coords]
+                else:
+                    coords = [
+                        [G.nodes[u]['x'], G.nodes[u]['y']],
+                        [G.nodes[v]['x'], G.nodes[v]['y']]
+                    ]
+                
+                features.append({
+                    'type': 'Feature',
+                    'geometry': {
+                        'type': 'LineString',
+                        'coordinates': coords
+                    },
+                    'properties': {
+                        'sidewalk_score': sidewalk_score,
+                        'sidewalk': data.get('sidewalk'),
+                        'highway': data.get('highway')
+                    }
+                })
+        
+        return jsonify({
+            'type': 'FeatureCollection',
+            'features': features
+        })
+    except Exception as e:
+        print(f"Error fetching sidewalks: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/businesses', methods=['GET'])
+def api_businesses():
+    """Return GeoJSON of streets near businesses."""
+    try:
+        G, lights = _get_graph()
+        
+        features = []
+        for u, v, k, data in G.edges(keys=True, data=True):
+            business_score = data.get('business_score', 0)
+            if business_score and business_score > 0:
+                # Get edge geometry or fallback to node coordinates
+                geom = data.get('geometry')
+                if geom:
+                    coords = [[x, y] for x, y in geom.coords]
+                else:
+                    coords = [
+                        [G.nodes[u]['x'], G.nodes[u]['y']],
+                        [G.nodes[v]['x'], G.nodes[v]['y']]
+                    ]
+                
+                features.append({
+                    'type': 'Feature',
+                    'geometry': {
+                        'type': 'LineString',
+                        'coordinates': coords
+                    },
+                    'properties': {
+                        'business_score': business_score
+                    }
+                })
+        
+        return jsonify({
+            'type': 'FeatureCollection',
+            'features': features
+        })
+    except Exception as e:
+        print(f"Error fetching businesses: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
     """Calculate walking-specific metrics for a route.
     
@@ -523,11 +609,11 @@ def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
         bbox: Bounding box tuple (north, south, east, west)
     
     Returns:
-        Dict with lighting_score, sidewalk_coverage, nearby_businesses
+        Dict with lighting_score, footpath_coverage, nearby_businesses
     """
     metrics = {
         "lighting_score": None,
-        "sidewalk_coverage": None,
+        "footpath_coverage": None,
         "nearby_businesses": None
     }
     
@@ -565,8 +651,8 @@ def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
             
             metrics["lighting_score"] = round((lit_segments / total_segments) * 100, 1)
         
-        # Calculate sidewalk coverage (from edge data)
-        sidewalk_segments = 0
+        # Calculate footpath coverage (from edge data)
+        footpath_segments = 0
         if total_segments > 0:
             for i in range(len(route_nodes) - 1):
                 node1 = route_nodes[i]
@@ -575,14 +661,12 @@ def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
                 try:
                     # Handle MultiGraph edges - access edge 0
                     edge_data = G.edges[node1, node2, 0]
-                    if 'sidewalk_score' in edge_data:
-                        sidewalk_score = edge_data['sidewalk_score']
-                        if sidewalk_score and sidewalk_score > 0:
-                            sidewalk_segments += 1
+                    if edge_data.get('is_footpath', False):
+                        footpath_segments += 1
                 except:
                     pass
             
-            metrics["sidewalk_coverage"] = round((sidewalk_segments / total_segments) * 100, 1)
+            metrics["footpath_coverage"] = round((footpath_segments / total_segments) * 100, 1)
         
         # Count nearby businesses along route segments
         nearby_businesses = 0
@@ -685,7 +769,7 @@ def api_routes():
             "avg_speed_kmh": 0,
             "safety_score": 0,
             "lighting_score": None,
-            "sidewalk_coverage": None,
+            "footpath_coverage": None,
             "nearby_businesses": None
         }
         
@@ -696,7 +780,7 @@ def api_routes():
             "travel_time_s": 0,
             "safety_score": 0,
             "lighting_score": None,
-            "sidewalk_coverage": None,
+            "footpath_coverage": None,
             "nearby_businesses": None
         }
         

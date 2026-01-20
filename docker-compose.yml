@@ -12,7 +12,8 @@ services:
     volumes:
       - ./cache:/app/cache
       - ./duke_cache.json:/app/duke_cache.json
-      - ./mapillary_cache.json:/app/mapillary_cache.json
+      - ./businesses_cache.json:/app/businesses_cache.json
+      - ./sidewalks_cache.json:/app/sidewalks_cache.json
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]

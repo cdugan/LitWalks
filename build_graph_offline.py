@@ -26,6 +26,9 @@ KEEP_ATTRS = {
     'speed_kph',          # For reference
     'name',               # For street name
     'optimized_weight',   # For routing (safety-adjusted)
+    'is_footpath',        # For display: boolean footpath vs road
+    'sidewalk',           # For display info
+    'highway',            # For display info
 }
 
 def strip_graph(G):

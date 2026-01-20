@@ -19,7 +19,12 @@ NLCD_LAYER = "NLCD_2021_Land_Cover_L48"
 NLCD_CACHE_FILE = "nlcd_cache.png"
 
 # OpenStreetMap (OSM) Overpass API for sidewalks and businesses
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# List of Overpass mirrors to try in order (primary may be overloaded)
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
+]
 BUSINESSES_CACHE_FILE = "businesses_cache.json"
 SIDEWALKS_CACHE_FILE = "sidewalks_cache.json"
 
@@ -314,22 +319,6 @@ def _parse_duke_items_to_latlon(data):
 
     return items
 
-# --- CACHE HELPERS ---
-def load_cache():
-    # kept for backward compatibility; returns mapillary-style cache if present
-    if os.path.exists(DUKE_CACHE_FILE):
-        try:
-            with open(DUKE_CACHE_FILE, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
-def save_cache(cache_data):
-    with open(DUKE_CACHE_FILE, 'w') as f:
-        json.dump(cache_data, f)
-
 
 # --- BUSINESS DATA FETCHING (via Overpass API) ---
 def fetch_open_businesses(bbox, current_time=None):
@@ -356,33 +345,16 @@ def fetch_open_businesses(bbox, current_time=None):
     north, south, east, west = bbox
     
     # Overpass QL query for amenities/shops - simplified query for better reliability
-    query = f"""[bbox:{south},{west},{north},{east}];
+    # Include [timeout:60][out:json] directives in proper Overpass QL format
+    query = f"""[bbox:{south},{west},{north},{east}][timeout:60][out:json];
 node["amenity"~"cafe|restaurant|shop|bank"];
 out center;
     """
     
-    # Retry logic for Overpass API (it's often overloaded)
-    max_retries = 3
-    retry_delay = 2
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(OVERPASS_URL, data=query, timeout=60)
-            response.raise_for_status()
-            if response.text.strip():  # Check if response has content
-                data = response.json()
-                break
-            else:
-                raise ValueError("Empty response from Overpass API")
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"   ⚠️ Overpass API error (attempt {attempt + 1}/{max_retries}): {e}")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                print(f"   ⚠️ Overpass API failed after {max_retries} attempts: {e}")
-                return []
-    else:
-        print(f"   ⚠️ Overpass API timeout after {max_retries} attempts")
+    # Query Overpass with failover to mirrors and retry logic
+    data, success = _query_overpass_with_failover(query, max_retries=5)
+    if not success:
+        print(f"   ⚠️ Overpass business query failed, skipping businesses")
         return []
     
     businesses = []
@@ -413,6 +385,66 @@ out center;
     return businesses
 
 
+# --- OVERPASS API HELPER ---
+def _query_overpass_with_failover(query: str, max_retries: int = 5):
+    """Query Overpass API with mirror failover and retry logic.
+    
+    Returns (data_dict, success_bool). On failure, returns ({}, False).
+    """
+    retry_delay = 3
+    for attempt in range(max_retries):
+        # Try each mirror in order
+        for mirror_idx, overpass_url in enumerate(OVERPASS_URLS):
+            try:
+                if attempt == 0 and mirror_idx == 0:
+                    print(f"   DEBUG: Query format:\n{query[:100]}...")
+                
+                url_label = f"Mirror {mirror_idx+1}/{len(OVERPASS_URLS)}"
+                print(f"   Querying Overpass {url_label} (attempt {attempt + 1}/{max_retries})...")
+                
+                response = requests.post(overpass_url, data=query, timeout=120)
+                
+                # Check for rate limit or server errors
+                if response.status_code == 429:
+                    print(f"     Rate limited by {url_label}, trying next mirror...")
+                    continue
+                elif response.status_code == 504:
+                    print(f"     Gateway timeout from {url_label}, trying next mirror...")
+                    continue
+                elif response.status_code >= 500:
+                    print(f"     Server error ({response.status_code}) from {url_label}, trying next mirror...")
+                    continue
+                elif response.status_code >= 400:
+                    raise Exception(f"Client error ({response.status_code}): {response.text[:100]}")
+                
+                response.raise_for_status()
+                
+                # Check if response has content
+                if not response.text or not response.text.strip():
+                    print(f"     Empty response from {url_label}, trying next mirror...")
+                    continue
+                
+                data = response.json()
+                print(f"   ✓ Success from {url_label}")
+                return (data, True)
+                
+            except requests.exceptions.Timeout:
+                print(f"     Timeout from {url_label}, trying next mirror...")
+                continue
+            except Exception as e:
+                print(f"     Error from {url_label}: {e}")
+                continue
+        
+        # All mirrors failed for this attempt, wait and retry
+        if attempt < max_retries - 1:
+            print(f"   All mirrors failed, retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+    
+    print(f"   ⚠️ Overpass API failed after {max_retries} attempts on all mirrors")
+    return ({}, False)
+
+
 # --- SIDEWALK DATA FETCHING (via Overpass API) ---
 def fetch_sidewalk_coverage(bbox):
     """Fetch sidewalk information for streets in a bbox using Overpass API.
@@ -433,34 +465,17 @@ def fetch_sidewalk_coverage(bbox):
     
     north, south, east, west = bbox
     
-    # Overpass QL query for ways with sidewalk information - simplified query
-    query = f"""[bbox:{south},{west},{north},{east}];
+    # Overpass QL query for ways with sidewalk information
+    # Include [timeout:60][out:json] directives in proper Overpass QL format
+    query = f"""[bbox:{south},{west},{north},{east}][timeout:60][out:json];
 way["highway"]["sidewalk"];
 out body;
     """
     
-    # Retry logic for Overpass API (it's often overloaded)
-    max_retries = 3
-    retry_delay = 2
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(OVERPASS_URL, data=query, timeout=60)
-            response.raise_for_status()
-            if response.text.strip():  # Check if response has content
-                data = response.json()
-                break
-            else:
-                raise ValueError("Empty response from Overpass API")
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"   ⚠️ Overpass API error (attempt {attempt + 1}/{max_retries}): {e}")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                print(f"   ⚠️ Overpass API failed after {max_retries} attempts: {e}")
-                return {}
-    else:
-        print(f"   ⚠️ Overpass API timeout after {max_retries} attempts")
+    # Query Overpass with failover to mirrors and retry logic
+    data, success = _query_overpass_with_failover(query, max_retries=5)
+    if not success:
+        print(f"   ⚠️ Overpass sidewalk query failed, skipping sidewalks")
         return {}
     
     sidewalk_info = {}

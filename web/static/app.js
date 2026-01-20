@@ -107,23 +107,24 @@ async function loadGraphData() {
                         const curveScore = props.curve_score !== undefined ? props.curve_score.toFixed(3) : 'N/A';
                         const darknessScore = props.darkness_score !== undefined ? props.darkness_score.toFixed(3) : 'N/A';
                         const highwayRisk = props.highway_risk !== undefined ? props.highway_risk.toFixed(3) : 'N/A';
-                        const highwayTag = props.highway_tag || 'unknown';
-                        const landRisk = props.land_risk !== undefined ? props.land_risk.toFixed(3) : 'N/A';
                         const landLabel = props.land_label || 'Unknown';
+                        const sidewalkScore = props.sidewalk_score !== undefined ? (props.sidewalk_score * 100).toFixed(0) : 'N/A';
+                        const businessScore = props.business_score !== undefined ? (props.business_score * 100).toFixed(0) : 'N/A';
                         let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
-                        popup += `Danger Score: ${safetyScore}<br>`;
+                        popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
+                        popup += `Safety Score: ${safetyScore}<br>`;
                         if (props.length !== undefined) {
                             popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
                         }
                         if (props.travel_time !== undefined) {
-                            popup += `Travel Time: ${props.travel_time.toFixed(0)} s<br>`;
+                            const minutes = Math.floor(props.travel_time / 60);
+                            const seconds = Math.round(props.travel_time % 60);
+                            popup += `Walking Time: ${minutes}m ${seconds}s<br>`;
                         }
-                        popup += `Lights: ${lightCount}<br>`;
-                        popup += `Curvature Score: ${curveScore}<br>`;
-                        popup += `Darkness Score: ${darknessScore}<br>`;
-                        popup += `Highway Risk (0 safest): ${highwayRisk}<br>`;
-                        popup += `Highway Tag: ${highwayTag}<br>`;
-                        popup += `Land Risk (0 safest): ${landRisk}<br>`;
+                        popup += `Streetlights: ${lightCount}<br>`;
+                        popup += `Lighting: ${darknessScore}<br>`;
+                        popup += `Sidewalk: ${sidewalkScore}%<br>`;
+                        popup += `Nearby Businesses: ${businessScore}%<br>`;
                         popup += `Land Use: ${landLabel}`;
                         layer.bindPopup(popup);
                     }
@@ -178,23 +179,24 @@ async function loadGraphData() {
                             const curveScore = props.curve_score !== undefined ? props.curve_score.toFixed(3) : 'N/A';
                             const darknessScore = props.darkness_score !== undefined ? props.darkness_score.toFixed(3) : 'N/A';
                             const highwayRisk = props.highway_risk !== undefined ? props.highway_risk.toFixed(3) : 'N/A';
-                            const highwayTag = props.highway_tag || 'unknown';
-                            const landRisk = props.land_risk !== undefined ? props.land_risk.toFixed(3) : 'N/A';
                             const landLabel = props.land_label || 'Unknown';
+                            const isFootpath = props.is_footpath ? 'Yes' : 'No';
+                            const businessScore = props.business_score !== undefined ? (props.business_score * 100).toFixed(0) : 'N/A';
                             let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
-                            popup += `Danger Score: ${safetyScore}<br>`;
+                            popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
+                            popup += `Safety Score: ${safetyScore}<br>`;
                             if (props.length !== undefined) {
                                 popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
                             }
                             if (props.travel_time !== undefined) {
-                                popup += `Travel Time: ${props.travel_time.toFixed(0)} s<br>`;
+                                const minutes = Math.floor(props.travel_time / 60);
+                                const seconds = Math.round(props.travel_time % 60);
+                                popup += `Walking Time: ${minutes}m ${seconds}s<br>`;
                             }
-                            popup += `Lights: ${lightCount}<br>`;
-                            popup += `Curvature Score: ${curveScore}<br>`;
-                            popup += `Darkness Score: ${darknessScore}<br>`;
-                            popup += `Highway Risk (0 safest): ${highwayRisk}<br>`;
-                            popup += `Highway Tag: ${highwayTag}<br>`;
-                            popup += `Land Risk (0 safest): ${landRisk}<br>`;
+                            popup += `Streetlights: ${lightCount}<br>`;
+                            popup += `Lighting: ${darknessScore}<br>`;
+                            popup += `Footpath: ${isFootpath}<br>`;
+                            popup += `Nearby Businesses: ${businessScore}%<br>`;
                             popup += `Land Use: ${landLabel}`;
                             layer.bindPopup(popup);
                         }
@@ -520,7 +522,7 @@ function displayResults(fastestData, safestData) {
         document.getElementById('safeLighting').textContent = 
             safestData.lighting_score ? safestData.lighting_score.toFixed(1) + '%' : 'N/A';
         document.getElementById('safeSidewalk').textContent = 
-            safestData.sidewalk_coverage ? safestData.sidewalk_coverage.toFixed(1) + '%' : 'N/A';
+            safestData.footpath_coverage ? safestData.footpath_coverage.toFixed(1) + '%' : 'N/A';
         document.getElementById('safeBusiness').textContent = 
             safestData.nearby_businesses ? safestData.nearby_businesses.toString() : 'N/A';
         safestRouteCard.style.display = 'block';
@@ -539,7 +541,7 @@ function displayResults(fastestData, safestData) {
         document.getElementById('fastLighting').textContent = 
             fastestData.lighting_score ? fastestData.lighting_score.toFixed(1) + '%' : 'N/A';
         document.getElementById('fastSidewalk').textContent = 
-            fastestData.sidewalk_coverage ? fastestData.sidewalk_coverage.toFixed(1) + '%' : 'N/A';
+            fastestData.footpath_coverage ? fastestData.footpath_coverage.toFixed(1) + '%' : 'N/A';
         document.getElementById('fastBusiness').textContent = 
             fastestData.nearby_businesses ? fastestData.nearby_businesses.toString() : 'N/A';
         fastestRouteCard.style.display = 'block';
@@ -678,20 +680,66 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Sidewalks toggle
+    let sidewalkLayer = null;
     const sidewalksToggle = document.getElementById('sidewalksToggle');
     if (sidewalksToggle) {
-        sidewalksToggle.addEventListener('change', function() {
-            // Implement sidewalk layer toggle
-            console.log('Sidewalk layer toggle:', this.checked);
+        sidewalksToggle.addEventListener('change', async function() {
+            if (this.checked) {
+                // Fetch and display sidewalk data
+                try {
+                    const response = await fetch('/api/sidewalks');
+                    const data = await response.json();
+                    
+                    sidewalkLayer = L.geoJSON(data, {
+                        style: {
+                            color: '#0066FF',
+                            weight: 3,
+                            opacity: 0.6
+                        }
+                    }).addTo(map);
+                    console.log('Sidewalk layer added');
+                } catch (error) {
+                    console.error('Error loading sidewalks:', error);
+                }
+            } else {
+                // Remove sidewalk layer
+                if (sidewalkLayer) {
+                    map.removeLayer(sidewalkLayer);
+                    sidewalkLayer = null;
+                }
+            }
         });
     }
     
     // Businesses toggle
+    let businessLayer = null;
     const businessesToggle = document.getElementById('businessesToggle');
     if (businessesToggle) {
-        businessesToggle.addEventListener('change', function() {
-            // Implement business layer toggle
-            console.log('Business layer toggle:', this.checked);
+        businessesToggle.addEventListener('change', async function() {
+            if (this.checked) {
+                // Fetch and display business data
+                try {
+                    const response = await fetch('/api/businesses');
+                    const data = await response.json();
+                    
+                    businessLayer = L.geoJSON(data, {
+                        style: {
+                            color: '#FFA500',
+                            weight: 3,
+                            opacity: 0.6
+                        }
+                    }).addTo(map);
+                    console.log('Business layer added');
+                } catch (error) {
+                    console.error('Error loading businesses:', error);
+                }
+            } else {
+                // Remove business layer
+                if (businessLayer) {
+                    map.removeLayer(businessLayer);
+                    businessLayer = null;
+                }
+            }
         });
     }
 });

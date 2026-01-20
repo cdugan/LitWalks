@@ -215,7 +215,9 @@ def build_safe_graph(bbox):
     print(f"1. Downloading street network for {bbox}...")
 
     # osmnx expects a tuple containing (west, south, east, north)
-    G = graph_from_bbox((west, south, east, north), network_type='drive', simplify=True)
+    # Use 'walk' network to include footways, paths, and pedestrian infrastructure
+    # This captures sidewalks as separate features, not just roads
+    G = graph_from_bbox((west, south, east, north), network_type='walk', simplify=True)
     mem_after_osm = _get_mem_mb()
     print(f"   ✓ OSM graph downloaded: {len(G.nodes())} nodes, {len(G.edges())} edges [mem: {mem_after_osm:.1f} MB, Δ +{mem_after_osm - mem_start:.1f} MB]")
 
@@ -386,6 +388,7 @@ def build_safe_graph(bbox):
     
     mem_after_speeds = _get_mem_mb()
     print(f"   ✓ Walking speeds/times added (5 km/h) [mem: {mem_after_speeds:.1f} MB]")
+    print(f"   Graph before scoring: {len(G_proj.nodes())} nodes, {len(G_proj.edges())} edges")
 
     # Fetch NLCD raster once for bbox
     print("   Fetching NLCD land cover raster for bbox once...")
@@ -452,17 +455,32 @@ def build_safe_graph(bbox):
         lights_per_meter = (light_count / length_m) if length_m and length_m > 0 else 0.0
         darkness_score = 1.0 / (1.0 + (lights_per_meter * DENSITY_SCALE))
 
-        # Sidewalk score: higher when sidewalk is available (safer for walking)
-        sidewalk_score = 0.5  # Default neutral score
-        edge_key = f"{u}_{v}"
-        if edge_key in sidewalk_data:
-            sw_info = sidewalk_data[edge_key]
-            if sw_info.get('has_sidewalk', False):
-                sidewalk_score = 1.0  # Safe: has dedicated sidewalk
-            elif sw_info.get('sidewalk_left', False) or sw_info.get('sidewalk_right', False):
-                sidewalk_score = 0.8  # Good: has sidewalk on at least one side
-            else:
-                sidewalk_score = 0.3  # Poor: no sidewalk
+        # Pedestrian infrastructure: BINARY classification
+        # Either it's a dedicated footpath (1.0) or it's a road (0.0)
+        # This forces routing to prefer footpaths over roads
+        is_footpath = False
+        sidewalk_score = 0.0  # Default: it's a road
+        
+        # Get highway tag (can be string or list)
+        highway_tag = data.get('highway', '')
+        if isinstance(highway_tag, list):
+            highway_tag = highway_tag[0] if highway_tag else ''
+        
+        # FOOTPATHS: Dedicated pedestrian infrastructure (separate from roads)
+        if highway_tag in ['footway', 'path', 'pedestrian', 'steps', 'corridor', 'cycleway']:
+            is_footpath = True
+            sidewalk_score = 1.0  # This is a footpath
+        else:
+            # ROADS: Everything else is a road (even low-traffic residential)
+            is_footpath = False
+            sidewalk_score = 0.0  # This is a road
+        
+        # Store both the score and the boolean for display
+        data['is_footpath'] = is_footpath
+        has_explicit_sidewalk = is_footpath
+        
+        # Store explicit sidewalk flag for overlay filtering
+        data['has_explicit_sidewalk'] = has_explicit_sidewalk
         
         # Business proximity score: higher when near open businesses (feels safer)
         business_score = 0.5  # Default neutral
@@ -532,6 +550,11 @@ def build_safe_graph(bbox):
         data['land_risk'] = land_risk
         data['land_label'] = land_label
         data['safety_score'] = float(safety)
+        
+        # CRITICAL: Heavily penalize roads to force footpath routing
+        # Multiply travel_time by 10x for roads to make them extremely unattractive
+        road_penalty = 1.0 if is_footpath else 10.0  # 10x penalty for roads
+        data['optimized_weight'] = data['travel_time'] * road_penalty * (1.0 / (safety + 0.01))
 
     # Debug summary for land cover sampling
     mem_after_scoring = _get_mem_mb()
@@ -540,6 +563,49 @@ def build_safe_graph(bbox):
     else:
         uniq = {c: land_codes.count(c) for c in set(land_codes)} if land_codes else {}
         print(f"   ▶ NLCD samples: {land_samples} (unknown: {land_unknown}) codes_seen: {uniq}")
+    
+    # Statistics on footpath vs road coverage
+    edges_with_footpath = 0
+    edges_with_business = 0
+    edges_total_roads = 0
+    sidewalk_scores = []
+    business_scores = []
+    highway_tags_found = {}
+    
+    for u, v, k, data in G_proj.edges(keys=True, data=True):
+        is_footpath = data.get('is_footpath', False)
+        sw_score = data.get('sidewalk_score', 0.0)
+        biz_score = data.get('business_score', 0.5)
+        sidewalk_scores.append(sw_score)
+        business_scores.append(biz_score)
+        
+        # Track highway tags for debugging (convert lists to strings)
+        hw_tag = data.get('highway', 'unknown')
+        if isinstance(hw_tag, list):
+            hw_tag = str(hw_tag)
+        highway_tags_found[hw_tag] = highway_tags_found.get(hw_tag, 0) + 1
+        
+        # Count footpaths vs roads
+        if is_footpath:
+            edges_with_footpath += 1
+        else:
+            edges_total_roads += 1
+        if biz_score > 0.5:
+            edges_with_business += 1
+    
+    total_edges = len(G_proj.edges())
+    footpath_pct = (edges_with_footpath / total_edges * 100) if total_edges > 0 else 0
+    road_pct = (edges_total_roads / total_edges * 100) if total_edges > 0 else 0
+    business_pct = (edges_with_business / total_edges * 100) if total_edges > 0 else 0
+    
+    # Calculate average scores
+    avg_sidewalk = sum(sidewalk_scores) / len(sidewalk_scores) if sidewalk_scores else 0.5
+    avg_business = sum(business_scores) / len(business_scores) if business_scores else 0.5
+    
+    print(f"   ▶ Highway tags distribution: {highway_tags_found}")
+    print(f"   ▶ Footpaths: {edges_with_footpath}/{total_edges} edges ({footpath_pct:.1f}%)")
+    print(f"   ▶ Roads: {edges_total_roads}/{total_edges} edges ({road_pct:.1f}%)")
+    print(f"   ▶ Business proximity: {edges_with_business}/{total_edges} edges ({business_pct:.1f}%) [avg: {avg_business:.2f}]")
     print(f"   ✓ Edge scoring complete [mem: {mem_after_scoring:.1f} MB]")
     
     # Release NLCD raster from memory after scoring
