@@ -168,23 +168,26 @@ async function loadGraphData() {
                     if (graphLayer) map.removeLayer(graphLayer);
                     graphLayer = L.geoJSON(full.edges, {
                         style: function(feature) {
-                            const safetyScore = feature.properties.safety_score || 100;
-                            const color = getSafetyColor(safetyScore);
+                            const dangerScore = feature.properties.danger_score || 0;
+                            const color = getDangerColor(dangerScore);
                             return { color: color, weight: 2.5, opacity: 0.85 };
                         },
                         onEachFeature: function(feature, layer) {
                             const props = feature.properties;
-                            const safetyScore = props.safety_score !== undefined ? props.safety_score.toFixed(1) : 'N/A';
+                            const dangerScore = props.danger_score !== undefined ? props.danger_score.toFixed(1) : 'N/A';
                             const lightCount = props.light_count || 0;
                             const curveScore = props.curve_score !== undefined ? props.curve_score.toFixed(3) : 'N/A';
                             const darknessScore = props.darkness_score !== undefined ? props.darkness_score.toFixed(3) : 'N/A';
                             const highwayRisk = props.highway_risk !== undefined ? props.highway_risk.toFixed(3) : 'N/A';
                             const landLabel = props.land_label || 'Unknown';
-                            const isFootpath = props.is_footpath ? 'Yes' : 'No';
+                            // Check both boolean and number representations
+                            const isFootpath = (props.is_footpath === true || props.is_footpath === 1 || props.sidewalk_score === 1.0) ? 'Yes' : 'No';
                             const businessScore = props.business_score !== undefined ? (props.business_score * 100).toFixed(0) : 'N/A';
+                            const highwayTag = props.highway || 'unknown';
                             let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
                             popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
-                            popup += `Safety Score: ${safetyScore}<br>`;
+                            popup += `Type: ${highwayTag}<br>`;
+                            popup += `Danger Score: ${dangerScore}<br>`;
                             if (props.length !== undefined) {
                                 popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
                             }
@@ -195,7 +198,7 @@ async function loadGraphData() {
                             }
                             popup += `Streetlights: ${lightCount}<br>`;
                             popup += `Lighting: ${darknessScore}<br>`;
-                            popup += `Footpath: ${isFootpath}<br>`;
+                            popup += `Footpath: ${isFootpath} (score: ${props.sidewalk_score})<br>`;
                             popup += `Nearby Businesses: ${businessScore}%<br>`;
                             popup += `Land Use: ${landLabel}`;
                             layer.bindPopup(popup);
@@ -224,28 +227,33 @@ async function loadGraphData() {
 }
 
 // Get color based on safety score with 6 divisions (lower is safer)
-function getSafetyColor(score) {
-    // score: 0-180 (lower is safer)
-    // 0-30: dark blue (very safe)
-    // 30-60: light blue (safe)
-    // 60-90: dark orange (moderately dangerous)
-    // 90-120: light orange (dangerous)
-    // 120-150: dark red (very dangerous)
-    // 150+: bright red (extremely dangerous)
+function getDangerColor(score) {
+    // Danger score: higher = more dangerous
+    // 0-10: dark blue (very safe)
+    // 10-20: light blue (safe)
+    // 20-30: yellow (moderate)
+    // 30-40: dark orange (moderately dangerous)
+    // 40-50: light orange (dangerous)
+    // 50+: red (very dangerous)
     
-    if (score <= 30) {
+    if (score <= 10) {
         return '#0047AB'; // Dark blue (very safe)
-    } else if (score <= 60) {
+    } else if (score <= 20) {
         return '#4A90E2'; // Light blue (safe)
-    } else if (score <= 90) {
+    } else if (score <= 30) {
+        return '#FFD700'; // Yellow (moderate)
+    } else if (score <= 40) {
         return '#FF8C00'; // Dark orange (moderately dangerous)
-    } else if (score <= 120) {
+    } else if (score <= 50) {
         return '#FFB347'; // Light orange (dangerous)
-    } else if (score <= 150) {
-        return '#CC0000'; // Dark red (very dangerous)
     } else {
-        return '#FF0000'; // Bright red (extremely dangerous)
+        return '#FF0000'; // Red (very dangerous)
     }
+}
+
+function getSafetyColor(score) {
+    // Legacy function - inverts danger to safety for old code
+    return getDangerColor(100 - score);
 }
 
 // Set start point

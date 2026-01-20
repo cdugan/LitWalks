@@ -466,6 +466,10 @@ def build_safe_graph(bbox):
         if isinstance(highway_tag, list):
             highway_tag = highway_tag[0] if highway_tag else ''
         
+        # DEBUG: Print first few footway tags to verify detection
+        if highway_tag == 'footway' and u < 5:
+            print(f"   DEBUG: Found footway edge {u}->{v}, tags: highway={highway_tag}, footway={data.get('footway', 'N/A')}")
+        
         # FOOTPATHS: Dedicated pedestrian infrastructure (separate from roads)
         if highway_tag in ['footway', 'path', 'pedestrian', 'steps', 'corridor', 'cycleway']:
             is_footpath = True
@@ -541,20 +545,22 @@ def build_safe_graph(bbox):
             except Exception:
                 pass
 
-        # Calculate walking safety score (higher = safer)
-        # Invert components so higher values mean safer
-        safety = (W_DARKNESS * darkness_score) + (W_SIDEWALK * sidewalk_score) + (W_BUSINESS * business_score) + (W_LAND * (1.0 - land_risk))
+        # Calculate walking DANGER score (higher = MORE dangerous)
+        # Invert components so higher values mean more dangerous
+        danger = (W_DARKNESS * darkness_score) + (W_SIDEWALK * (1.0 - sidewalk_score)) + (W_BUSINESS * (1.0 - business_score)) + (W_LAND * land_risk)
         data['darkness_score'] = darkness_score
         data['sidewalk_score'] = sidewalk_score
         data['business_score'] = business_score
         data['land_risk'] = land_risk
         data['land_label'] = land_label
-        data['safety_score'] = float(safety)
+        data['danger_score'] = float(danger)
         
         # CRITICAL: Heavily penalize roads to force footpath routing
-        # Multiply travel_time by 10x for roads to make them extremely unattractive
+        # Use inverted danger for routing weight (lower danger = lower weight)
+        # Multiply by road_penalty, then divide by safety (inverted danger)
         road_penalty = 1.0 if is_footpath else 10.0  # 10x penalty for roads
-        data['optimized_weight'] = data['travel_time'] * road_penalty * (1.0 / (safety + 0.01))
+        safety_for_routing = 100.0 - danger  # Invert danger to safety for routing
+        data['optimized_weight'] = data['travel_time'] * road_penalty / (safety_for_routing + 0.01)
 
     # Debug summary for land cover sampling
     mem_after_scoring = _get_mem_mb()

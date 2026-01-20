@@ -249,7 +249,8 @@ def graph_to_geojson(G):
                 coords = [[u_lon, u_lat], [v_lon, v_lat]]
 
             length_val = data.get('length', 0)
-            safety_val = data.get('safety_score', 100)
+            # Use danger_score (higher = more dangerous), fallback to inverted safety_score for old graphs
+            danger_val = data.get('danger_score', 100 - data.get('safety_score', 0))
 
             features.append({
                 "type": "Feature",
@@ -258,17 +259,18 @@ def graph_to_geojson(G):
                     "coordinates": coords
                 },
                 "properties": {
-                    "safety_score": safety_val,
+                    "danger_score": danger_val,
                     "light_count": data.get('light_count', 0),
-                    "curve_score": data.get('curve_score', 0),
                     "darkness_score": data.get('darkness_score', 0),
-                    "highway_risk": data.get('highway_risk', 1),
-                    "highway_tag": data.get('highway_tag', None),
+                    "sidewalk_score": data.get('sidewalk_score', 0),
+                    "business_score": data.get('business_score', 0.5),
+                    "is_footpath": data.get('is_footpath', False),
+                    "highway": data.get('highway', 'unknown'),
                     "land_risk": data.get('land_risk', 0.6),
                     "land_label": data.get('land_label', 'Unknown'),
                     "travel_time": data.get('travel_time', 0),
                     "length": length_val,
-                    "speed_kph": data.get('speed_kph', 40),
+                    "speed_kph": data.get('speed_kph', 5),
                     "name": data.get('name', 'Unknown')
                 }
             })

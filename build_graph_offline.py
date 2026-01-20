@@ -16,11 +16,7 @@ KEEP_ATTRS = {
     'geometry',           # For rendering and route geometry
     'length',             # For distance/travel_time calculations
     'travel_time',        # For routing weight
-    'safety_score',       # For safety visualization
-    'light_count',        # For debug visualization
-    'darkness_score',     # For component breakdown
-    'sidewalk_score',     # For walking metrics
-    'business_score',     # For walking metrics
+        'danger_score',       # For danger visualization (higher = more dangerous)
     'land_risk',          # For component breakdown
     'land_label',         # For component breakdown
     'speed_kph',          # For reference
