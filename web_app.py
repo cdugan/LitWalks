@@ -37,12 +37,13 @@ print(f"[startup] Memory after Flask/CORS: {_mem_after_flask:.1f} MB (D +{_mem_a
 # --- Pre-built graph loading ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
 _graph_cache = {}
+_businesses_cache = None
 _GRAPH_LOADED = False
 _GRAPH_LOAD_ERROR = None
 
 def _load_prebuilt_graph():
     """Load the pre-built graph from pickle file."""
-    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR
+    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR, _businesses_cache
     import pickle
     
     if not os.path.exists(_GRAPH_PREBUILT_FILE):
@@ -55,12 +56,19 @@ def _load_prebuilt_graph():
         print(f"[startup] Loading pre-built graph from {_GRAPH_PREBUILT_FILE}...")
         start = time.time()
         with open(_GRAPH_PREBUILT_FILE, 'rb') as f:
-            G, lights, bbox = pickle.load(f)
+            data = pickle.load(f)
+            # Handle both old and new pickle formats
+            if len(data) == 4:
+                G, lights, businesses, bbox = data
+                _businesses_cache = businesses
+            else:
+                G, lights, bbox = data
+                _businesses_cache = []
         elapsed = time.time() - start
         
         _graph_cache[str(BBOX)] = (G, lights)
         _GRAPH_LOADED = True
-        print(f"[startup] Graph loaded in {elapsed:.3f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
+        print(f"[startup] Graph loaded in {elapsed:.3f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0} businesses={len(_businesses_cache) if _businesses_cache else 0}")
         return True
     except Exception as e:
         _GRAPH_LOAD_ERROR = str(e)
@@ -264,10 +272,14 @@ def graph_to_geojson(G):
                     "darkness_score": data.get('darkness_score', 0),
                     "sidewalk_score": data.get('sidewalk_score', 0),
                     "business_score": data.get('business_score', 0.5),
+                    "business_count": data.get('business_count', 0),
+                    "business_name": data.get('business_name', None),
+                    "business_hours": data.get('business_hours', []),
                     "is_footpath": data.get('is_footpath', False),
                     "highway": data.get('highway', 'unknown'),
                     "land_risk": data.get('land_risk', 0.6),
                     "land_label": data.get('land_label', 'Unknown'),
+                    "speed_risk": data.get('speed_risk', 0.0),
                     "travel_time": data.get('travel_time', 0),
                     "length": length_val,
                     "speed_kph": data.get('speed_kph', 5),
@@ -563,39 +575,32 @@ def api_sidewalks():
 
 @app.route('/api/businesses', methods=['GET'])
 def api_businesses():
-    """Return GeoJSON of streets near businesses."""
+    """Return list of individual business points."""
     try:
-        G, lights = _get_graph()
+        global _businesses_cache
         
-        features = []
-        for u, v, k, data in G.edges(keys=True, data=True):
-            business_score = data.get('business_score', 0)
-            if business_score and business_score > 0:
-                # Get edge geometry or fallback to node coordinates
-                geom = data.get('geometry')
-                if geom:
-                    coords = [[x, y] for x, y in geom.coords]
-                else:
-                    coords = [
-                        [G.nodes[u]['x'], G.nodes[u]['y']],
-                        [G.nodes[v]['x'], G.nodes[v]['y']]
-                    ]
-                
-                features.append({
-                    'type': 'Feature',
-                    'geometry': {
-                        'type': 'LineString',
-                        'coordinates': coords
-                    },
-                    'properties': {
-                        'business_score': business_score
-                    }
-                })
+        # Return businesses as simple list of dicts
+        business_list = []
+        if _businesses_cache:
+            for biz in _businesses_cache:
+                # Handle both old (lat, lon, name, btype) and new (lat, lon, name, btype, hours, review_count, is_open) formats
+                if len(biz) >= 4:
+                    lat, lon, name, btype = biz[:4]
+                    hours = biz[4] if len(biz) > 4 else []
+                    review_count = biz[5] if len(biz) > 5 else 0
+                    is_open = biz[6] if len(biz) > 6 else True
+                    
+                    business_list.append({
+                        'lat': lat,
+                        'lon': lon,
+                        'name': name,
+                        'type': btype,
+                        'hours': hours if isinstance(hours, list) else [],
+                        'review_count': review_count,
+                        'is_open': is_open
+                    })
         
-        return jsonify({
-            'type': 'FeatureCollection',
-            'features': features
-        })
+        return jsonify(business_list)
     except Exception as e:
         print(f"Error fetching businesses: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500

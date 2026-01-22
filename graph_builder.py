@@ -9,7 +9,13 @@ def _get_mem_mb():
     except Exception:
         return 0
 
-from data_fetcher import fetch_duke_lights, fetch_nlcd_raster, fetch_sidewalk_coverage, fetch_open_businesses
+from data_fetcher import (
+    fetch_duke_lights,
+    fetch_nlcd_raster,
+    fetch_sidewalk_coverage,
+    fetch_businesses,
+    GOOGLE_PLACES_API_KEY,
+)
 
 import math
 _mem_after_math = _get_mem_mb()
@@ -32,13 +38,14 @@ except Exception:
 SKIP_OVERPASS = os.environ.get('SKIP_OVERPASS', '0') == '1'
 
 # --- SAFETY SCORING PARAMS FOR WALKING ROUTES ---
-# For walking, we prioritize: darkness, sidewalk availability, proximity to open businesses, and land use
-# safety = w_darkness*darkness_score + w_sidewalk*sidewalk_score + w_business*business_score + w_land*land_risk
+# For walking, we prioritize: darkness, sidewalk availability, proximity to open businesses, land use, and speed limit
+# danger = w_darkness*darkness_score + w_sidewalk*(1-sidewalk_score) + w_business*(1-business_score) + w_land*land_risk + w_speed*speed_risk
 # Curviness is removed as it's not relevant for pedestrians choosing between routes
 W_DARKNESS = 40.0
 W_SIDEWALK = 30.0  # Higher weight for sidewalk availability (critical for walking safety)
 W_BUSINESS = 15.0  # Routes near open businesses feel safer
-W_LAND = 15.0
+W_LAND = 10.0
+W_SPEED = 5.0      # Speed limit risk for roads (higher speed = more dangerous)
 DENSITY_SCALE = 50.0  # scaling factor for lights per meter to darkness score
 
 
@@ -421,25 +428,58 @@ def build_safe_graph(bbox):
     
     # Fetch open businesses for the bbox
     businesses = []
-    if not SKIP_OVERPASS:
-        print("   Fetching nearby open businesses...")
-        businesses = fetch_open_businesses(bbox)
-        print(f"   ✓ Found {len(businesses)} open businesses")
+    # Fetch businesses: prefer Google Places when available, else Overpass
+    businesses = []
+    if os.environ.get('BUSINESSES_PROVIDER', '').lower() == 'google' or (GOOGLE_PLACES_API_KEY and GOOGLE_PLACES_API_KEY != ''):
+        print("   Fetching nearby businesses (Google Places)...")
+        businesses = fetch_businesses(bbox)
+        print(f"   ✓ Found {len(businesses)} businesses (Google)")
+    elif not SKIP_OVERPASS:
+        print("   Fetching nearby businesses (OSM Overpass)...")
+        businesses = fetch_businesses(bbox)
+        print(f"   ✓ Found {len(businesses)} businesses (OSM)")
+    else:
+        print("   Skipping business fetch (SKIP_OVERPASS=1)")
     
-    # Build a spatial index of businesses for proximity scoring (simple approach)
-    business_locations = set()
+    # Build a spatial index of businesses for proximity scoring (store names and hours per cell)
+    business_locations = {}  # (cell_lat, cell_lon) -> list of (name, hours, review_count, is_open)
     if businesses:
-        for lat, lon, name, btype in businesses:
-            # Grid-based bucketing: convert to grid cells for faster proximity checks
-            cell_lat = round(lat * 1000)  # ~111m precision
+        for biz in businesses:
+            # Handle both old (lat, lon, name, btype) and new (lat, lon, name, btype, hours, review_count, is_open) formats
+            if len(biz) >= 4:
+                lat, lon, name, btype = biz[:4]
+                hours = biz[4] if len(biz) > 4 else []
+                review_count = biz[5] if len(biz) > 5 else 0
+                is_open = biz[6] if len(biz) > 6 else None
+            else:
+                continue
+            
+            # Grid-based bucketing: convert to grid cells for faster proximity checks (~111m)
+            cell_lat = round(lat * 1000)
             cell_lon = round(lon * 1000)
-            business_locations.add((cell_lat, cell_lon))
+            key = (cell_lat, cell_lon)
+            if key not in business_locations:
+                business_locations[key] = []
+            business_locations[key].append((name, hours, review_count, is_open))
+        
+        # Debug: Print sample business locations
+        sample_businesses = list(businesses)[:3]
+        print(f"   DEBUG: Sample businesses:")
+        for biz in sample_businesses:
+            if len(biz) >= 3:
+                lat, lon, name = biz[:3]
+                review_count = biz[5] if len(biz) > 5 else 0
+                cell_lat = round(lat * 1000)
+                cell_lon = round(lon * 1000)
+                print(f"     {name}: lat={lat:.6f} lon={lon:.6f} reviews={review_count} -> cell=({cell_lat}, {cell_lon})")
+        print(f"   DEBUG: Total business grid cells: {len(business_locations)}")
 
     # Scoring: safety = w_darkness*darkness_score + w_sidewalk*sidewalk_score + w_business*business_score + w_land*land_risk
     print("   Scoring edges for walking safety...")
     land_samples = 0
     land_unknown = 0
     land_codes = []
+    edge_idx = 0  # Counter for debug output
     for u, v, k, data in G_proj.edges(keys=True, data=True):
         # Darkness score from lights per meter (higher when darker)
         length_m = data.get('length', 0.0)
@@ -486,37 +526,129 @@ def build_safe_graph(bbox):
         # Store explicit sidewalk flag for overlay filtering
         data['has_explicit_sidewalk'] = has_explicit_sidewalk
         
-        # Business proximity score: higher when near open businesses (feels safer)
+        # Business proximity score: higher when near ANY business (feels safer)
         business_score = 0.5  # Default neutral
-        try:
-            if len(data.get('geometry', [])) > 0 or True:  # Check if we can get midpoint
+        business_count = 0
+        business_name = None
+        if business_locations:  # Only check if we have businesses
+            try:
                 geom = data.get('geometry')
                 if geom is not None and hasattr(geom, 'interpolate'):
                     mid_pt = geom.interpolate(0.5, normalized=True)
-                    mid_lat, mid_lon = transformer_to_latlon.transform(mid_pt.x, mid_pt.y) if transformer_to_latlon else (0, 0)
+                    # Transform from projected coords (x,y) to lon/lat for business matching
+                    lon, lat = transformer_to_latlon.transform(mid_pt.x, mid_pt.y) if transformer_to_latlon else (mid_pt.x, mid_pt.y)
                 else:
-                    lon1, lat1 = G_proj.nodes[u]['x'], G_proj.nodes[u]['y']
-                    lon2, lat2 = G_proj.nodes[v]['x'], G_proj.nodes[v]['y']
-                    mid_lon, mid_lat = (lon1 + lon2) / 2.0, (lat1 + lat2) / 2.0
+                    # Nodes in G_proj are in projected coordinates, must transform to lon/lat
+                    x1, y1 = G_proj.nodes[u]['x'], G_proj.nodes[u]['y']
+                    x2, y2 = G_proj.nodes[v]['x'], G_proj.nodes[v]['y']
+                    midx, midy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                    lon, lat = transformer_to_latlon.transform(midx, midy) if transformer_to_latlon else (midx, midy)
                 
-                # Check business proximity (within ~500m / ~5 grid cells)
-                cell_lat = round(mid_lat * 1000)
-                cell_lon = round(mid_lon * 1000)
+                # Check business proximity (within ~200m / ~2 grid cells)
+                # 1000 * lat/lon gives ~111m precision per unit
+                cell_lat = round(lat * 1000)
+                cell_lon = round(lon * 1000)
+                
+                # DEBUG: Print first few edge midpoints (lat, lon)
+                if edge_idx < 3:
+                    print(f"   DEBUG: Edge #{edge_idx} ({u}->{v}): mid=({lat:.6f}, {lon:.6f}) -> cell=({cell_lat}, {cell_lon})")
+                
                 nearby_businesses = False
-                for dlat in range(-5, 6):
-                    for dlon in range(-5, 6):
-                        if (cell_lat + dlat, cell_lon + dlon) in business_locations:
-                            nearby_businesses = True
-                            break
-                    if nearby_businesses:
-                        break
+                total_matches = 0
+                sample_name = None
+                
+                # Search in a 2-cell radius (~200m) and count all businesses
+                for dlat in range(-2, 3):
+                    for dlon in range(-2, 3):
+                        key = (cell_lat + dlat, cell_lon + dlon)
+                        if key in business_locations:
+                            biz_list = business_locations.get(key, [])
+                            for biz_info in biz_list:
+                                # Extract business info: (name, hours, review_count, is_open)
+                                if isinstance(biz_info, tuple) and len(biz_info) >= 4:
+                                    name, hours, review_count, is_open = biz_info
+                                elif isinstance(biz_info, str):
+                                    # Legacy format (just name)
+                                    name = biz_info
+                                    hours = []
+                                    review_count = 0
+                                    is_open = None
+                                else:
+                                    continue
+                                
+                                # Check if business is open at estimated departure time
+                                # For now, if is_open info available and is False, skip; otherwise include
+                                if is_open is False:
+                                    continue  # Business is closed, skip it
+                                
+                                total_matches += 1
+                                if sample_name is None:
+                                    sample_name = name
+                                nearby_businesses = True
+                            
+                            if edge_idx < 3:
+                                print(f"   DEBUG: Found {len(biz_list)} businesses at offset ({dlat}, {dlon})")
                 
                 if nearby_businesses:
-                    business_score = 0.9  # Good: near businesses
+                    business_score = 0.9  # Good: near open businesses
+                    business_count = total_matches
+                    business_name = sample_name
                 else:
-                    business_score = 0.4  # Poor: isolated area
-        except Exception:
-            pass
+                    business_score = 0.3  # Poor: isolated area or all closed
+                    business_count = 0
+                    business_name = None
+            except Exception:
+                pass
+
+        # Speed limit risk: Only applies to roads without sidewalks
+        # Footpaths have no speed risk (pedestrian-only)
+        # For roads: 10mph = very safe (0.0), 45mph+ = very dangerous (1.0)
+        speed_risk = 0.0
+        if not is_footpath:  # Only calculate for roads
+            # Try to get maxspeed from OSM data
+            maxspeed = data.get('maxspeed', None)
+            if maxspeed is not None:
+                # Parse maxspeed (can be "25 mph", "40", or list)
+                if isinstance(maxspeed, list):
+                    maxspeed = maxspeed[0] if maxspeed else None
+                if isinstance(maxspeed, str):
+                    # Extract numeric value
+                    import re
+                    match = re.search(r'(\d+)', maxspeed)
+                    if match:
+                        speed_mph = int(match.group(1))
+                        # If it looks like km/h (> 60), convert to mph
+                        if speed_mph > 60:
+                            speed_mph = int(speed_mph * 0.621371)
+                    else:
+                        speed_mph = None
+                elif isinstance(maxspeed, (int, float)):
+                    speed_mph = int(maxspeed)
+                    if speed_mph > 60:
+                        speed_mph = int(speed_mph * 0.621371)
+                else:
+                    speed_mph = None
+            else:
+                # Estimate from highway type if maxspeed not available
+                speed_estimates = {
+                    'motorway': 65, 'motorway_link': 45,
+                    'trunk': 55, 'trunk_link': 45,
+                    'primary': 45, 'primary_link': 35,
+                    'secondary': 35, 'secondary_link': 30,
+                    'tertiary': 30, 'tertiary_link': 25,
+                    'residential': 25, 'living_street': 15,
+                    'unclassified': 25, 'service': 15,
+                    'road': 25
+                }
+                speed_mph = speed_estimates.get(highway_tag, 25)
+            
+            # Calculate risk: 10mph=0.0 (safe), 45mph+=1.0 (dangerous)
+            if speed_mph is not None:
+                speed_risk = max(0.0, min(1.0, (speed_mph - 10) / 35.0))
+            else:
+                speed_risk = 0.5  # Unknown speed, assume moderate risk
+        
+        data['speed_risk'] = speed_risk
 
         # Land cover risk from NLCD raster at midpoint
         land_risk = 0.6
@@ -547,12 +679,40 @@ def build_safe_graph(bbox):
 
         # Calculate walking DANGER score (higher = MORE dangerous)
         # Invert components so higher values mean more dangerous
-        danger = (W_DARKNESS * darkness_score) + (W_SIDEWALK * (1.0 - sidewalk_score)) + (W_BUSINESS * (1.0 - business_score)) + (W_LAND * land_risk)
+        danger = (W_DARKNESS * darkness_score) + (W_SIDEWALK * (1.0 - sidewalk_score)) + (W_BUSINESS * (1.0 - business_score)) + (W_LAND * land_risk) + (W_SPEED * speed_risk)
         data['darkness_score'] = darkness_score
         data['sidewalk_score'] = sidewalk_score
         data['business_score'] = business_score
+        data['business_count'] = int(business_count) if 'business_count' in locals() else 0
+        if 'business_name' in locals() and business_name:
+            data['business_name'] = str(business_name)
+        else:
+            data['business_name'] = None
+        
+        # Store opening hours for later time-based filtering during routing
+        # Collects hours from all nearby businesses for reference
+        if business_locations and nearby_businesses:
+            try:
+                all_hours = []
+                cell_lat = round(lat * 1000)
+                cell_lon = round(lon * 1000)
+                for dlat in range(-2, 3):
+                    for dlon in range(-2, 3):
+                        key = (cell_lat + dlat, cell_lon + dlon)
+                        if key in business_locations:
+                            for biz_info in business_locations[key]:
+                                if isinstance(biz_info, tuple) and len(biz_info) >= 2:
+                                    name, hours = biz_info[0], biz_info[1]
+                                    if hours:
+                                        all_hours.extend(hours)
+                data['business_hours'] = all_hours[:14] if all_hours else []  # Store first 14 lines (2 weeks)
+            except Exception:
+                data['business_hours'] = []
+        else:
+            data['business_hours'] = []
         data['land_risk'] = land_risk
         data['land_label'] = land_label
+        data['speed_risk'] = speed_risk
         data['danger_score'] = float(danger)
         
         # CRITICAL: Heavily penalize roads to force footpath routing
@@ -561,6 +721,8 @@ def build_safe_graph(bbox):
         road_penalty = 1.0 if is_footpath else 10.0  # 10x penalty for roads
         safety_for_routing = 100.0 - danger  # Invert danger to safety for routing
         data['optimized_weight'] = data['travel_time'] * road_penalty / (safety_for_routing + 0.01)
+        
+        edge_idx += 1  # Increment counter
 
     # Debug summary for land cover sampling
     mem_after_scoring = _get_mem_mb()
@@ -643,4 +805,4 @@ def build_safe_graph(bbox):
     mem_final = _get_mem_mb()
     print(f"   ✓ Build complete [final mem: {mem_final:.1f} MB, total Δ +{mem_final - mem_start:.1f} MB]")
     
-    return G_latlon, lights_latlon
+    return G_latlon, lights_latlon, businesses

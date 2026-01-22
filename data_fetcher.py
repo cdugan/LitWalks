@@ -28,6 +28,11 @@ OVERPASS_URLS = [
 BUSINESSES_CACHE_FILE = "businesses_cache.json"
 SIDEWALKS_CACHE_FILE = "sidewalks_cache.json"
 
+# Google Places API
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "").strip()
+BUSINESSES_PROVIDER = os.environ.get("BUSINESSES_PROVIDER", "").strip().lower()  # 'google' | 'osm' | ''
+SKIP_PLACES_CACHE = os.environ.get("SKIP_PLACES_CACHE", "").lower() in ("1", "true", "yes")
+
 def fetch_duke_lights(bbox):
     """
     Fetch Duke streetlights within bbox and return list of (lat, lon) tuples.
@@ -320,34 +325,228 @@ def _parse_duke_items_to_latlon(data):
     return items
 
 
-# --- BUSINESS DATA FETCHING (via Overpass API) ---
+# --- BUSINESS DATA FETCHING (Google Places or Overpass) ---
+def fetch_businesses(bbox):
+    """Fetch businesses using Google Places if configured, else Overpass.
+
+    Returns list of (lat, lon, name, type) tuples.
+    """
+    preferred = BUSINESSES_PROVIDER
+    if preferred == "google" or GOOGLE_PLACES_API_KEY:
+        items = fetch_google_places_businesses(bbox, GOOGLE_PLACES_API_KEY)
+        if items:
+            return items
+        # Fallback to OSM if Google fails
+        print("   ⚠️ Google Places returned no results or failed; falling back to Overpass")
+    return fetch_open_businesses(bbox)
+
+
+def _bbox_centroid(bbox):
+    n, s, e, w = bbox
+    return ( (n + s) / 2.0, (e + w) / 2.0 )
+
+
+def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, max_reviews=999999):
+    """Fetch businesses in bbox via Google Places API (New).
+
+    Uses the new Places API v1 endpoint with searchNearby method.
+    Strategy: sample a grid of centers over bbox and call searchNearby.
+    Deduplicate by place_id. Returns list of (lat, lon, name, type, hours, review_count, is_open).
+    
+    Args:
+        min_reviews: Filter for businesses with at least this many reviews (less crowded)
+        max_reviews: Filter for businesses with at most this many reviews (avoid very popular)
+    """
+    if not api_key:
+        print("   DEBUG: No Google Places API key provided")
+        return []
+
+    # Cache key distinguishes provider and parameters
+    # Using aggressive caching (24 hours) to minimize expensive Places API calls
+    cache = _load_json_cache(BUSINESSES_CACHE_FILE)
+    bbox_key = f"google_{bbox[0]:.4f}_{bbox[1]:.4f}_{bbox[2]:.4f}_{bbox[3]:.4f}_{radius_m}_{min_reviews}_{max_reviews}"
+    if not SKIP_PLACES_CACHE and bbox_key in cache:
+        cached_time = cache[bbox_key].get('timestamp', 0)
+        cached_businesses = cache[bbox_key].get('businesses', [])
+        # Cache for 24 hours (only query Places API once per day, minimizes quota usage)
+        # But skip cache if it has 0 businesses (likely a previous API error)
+        if time.time() - cached_time < 86400 and len(cached_businesses) > 0:
+            print(f"   ✓ Using cached Google Places data ({len(cached_businesses)} businesses, {int((time.time() - cached_time)/3600)}h old)")
+            return cached_businesses
+        elif len(cached_businesses) == 0:
+            print(f"   ⚠️ Cached Google Places data has 0 businesses, re-fetching...")
+    elif SKIP_PLACES_CACHE:
+        print(f"   DEBUG: SKIP_PLACES_CACHE=1, bypassing cache")
+
+    north, south, east, west = bbox
+    
+    base_url = "https://places.googleapis.com/v1/places:searchNearby"
+    all_results = {}
+    
+    # Debugging counters
+    total_raw_results = 0
+    filtered_by_review_count = 0
+    filtered_by_bbox = 0
+    
+    headers = {
+        "X-Goog-Api-Key": api_key,
+        "Content-Type": "application/json",
+        "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.types,places.userRatingCount"
+    }
+
+    def _do_request(center_lat, center_lon, radius):
+        try:
+            payload = {
+                "locationRestriction": {
+                    "circle": {
+                        "center": {
+                            "latitude": center_lat,
+                            "longitude": center_lon
+                        },
+                        "radius": radius
+                    }
+                },
+                "includedTypes": [
+                    "restaurant",
+                    "cafe",
+                    "bar",
+                    "bakery",
+                    "meal_takeaway",
+                    "meal_delivery"
+                ],
+                "maxResultCount": 20
+            }
+            
+            resp = requests.post(base_url, json=payload, headers=headers, timeout=30)
+            data = resp.json()
+            
+            # Log API response details for debugging
+            if resp.status_code != 200:
+                print(f"   DEBUG: Google Places API response - HTTP {resp.status_code}")
+                if 'error' in data:
+                    error_msg = data['error'].get('message', 'No error message provided')
+                    print(f"   ⚠️ Google Places error: {error_msg}")
+                return None
+            
+            result_count = len(data.get('places', []))
+            
+            return data
+        except Exception as e:
+            print(f"   ⚠️ Google Places error: {e}")
+            return None
+
+    # Use a fine grid of circles to ensure comprehensive coverage
+    # For a ~1 mile square area, use 3x3 grid with 300m radius (overlapping circles)
+    lat_steps = 3
+    lon_steps = 3
+    lat_min, lat_max = south, north
+    lon_min, lon_max = west, east
+
+    def linspace(a, b, n):
+        if n == 1:
+            return [(a + b) / 2.0]
+        step = (b - a) / (n - 1)
+        return [a + i * step for i in range(n)]
+
+    centers = [(lat, lon) for lat in linspace(lat_min, lat_max, lat_steps)
+                           for lon in linspace(lon_min, lon_max, lon_steps)]
+
+    print(f"   DEBUG: Using searchNearby with {len(centers)} grid points (radius={radius_m}m)")
+    
+    for idx, (center_lat, center_lon) in enumerate(centers):
+        print(f"   DEBUG: Grid point {idx+1}/{len(centers)}: ({center_lat:.5f}, {center_lon:.5f})")
+        data = _do_request(center_lat, center_lon, radius_m)
+        if not data:
+            continue
+            
+        places = data.get("places", [])
+        total_raw_results += len(places)
+        
+        for place in places:
+            place_id = place.get("id")
+            if not place_id:
+                continue
+                
+            name = place.get("displayName", {}).get("text", "N/A")
+            loc_data = place.get("location", {})
+            lat = loc_data.get("latitude")
+            lon = loc_data.get("longitude")
+            
+            if lat is None or lon is None:
+                continue
+            
+            # Filter by bbox - ensure we only include businesses strictly within the area
+            if not (south <= lat <= north and west <= lon <= east):
+                filtered_by_bbox += 1
+                continue
+                
+            types = place.get("types", [])
+            primary_type = types[0] if types else "unknown"
+            
+            # Get review count
+            review_count = place.get("userRatingCount", 0)
+            
+            # Filter by minimum review count only
+            if review_count < min_reviews:
+                filtered_by_review_count += 1
+                continue
+            
+            # Check if already seen (deduplication across grid searches)
+            if place_id in all_results:
+                continue
+            
+            all_results[place_id] = (lat, lon, name, primary_type, [], review_count, None)
+
+    businesses = list(all_results.values())
+    
+    # Log final results
+    print(f"   DEBUG: Total raw results from API: {total_raw_results}")
+    print(f"   DEBUG: Filtered by bbox: {filtered_by_bbox}")
+    print(f"   DEBUG: Filtered by review count: {filtered_by_review_count}")
+    print(f"   DEBUG: Final unique businesses: {len(businesses)}")
+    
+    if len(businesses) == 0:
+        print(f"   ⚠️ No businesses found matching criteria (min_reviews={min_reviews})")
+        print(f"   DEBUG: Try adjusting review filters or check if businesses exist in the area")
+    
+    cache[bbox_key] = {
+        'timestamp': time.time(),
+        'businesses': businesses,
+        'provider': 'google',
+        'count': len(businesses),
+        'bbox': bbox,
+        'radius_m': radius_m,
+        'min_reviews': min_reviews,
+        'max_reviews': max_reviews,
+        'note': 'Cached with full hours/reviews for time-based filtering during routing'
+    }
+    _save_json_cache(BUSINESSES_CACHE_FILE, cache)
+    print(f"   ✓ Fetched {len(businesses)} businesses from Google Places API (cached for 24h)")
+    return businesses
 def fetch_open_businesses(bbox, current_time=None):
-    """Fetch currently open businesses near a bbox using Overpass API.
+    """Fetch all businesses near a bbox using Overpass API (ignores opening hours).
     
     bbox: (north, south, east, west)
-    current_time: datetime object or None (uses current time if None)
+    current_time: ignored (kept for backwards compatibility)
     
-    Returns list of (lat, lon, name, type) tuples for open businesses.
+    Returns list of (lat, lon, name, type) tuples for all businesses.
     """
-    if current_time is None:
-        import datetime
-        current_time = datetime.datetime.now()
+    # Ignore timing - just fetch all businesses
     
     businesses_cache = _load_json_cache(BUSINESSES_CACHE_FILE)
     bbox_key = f"{bbox[0]:.4f}_{bbox[1]:.4f}_{bbox[2]:.4f}_{bbox[3]:.4f}"
     
-    # Check cache (valid for 1 hour since business hours change)
-    if bbox_key in businesses_cache:
-        cached_time = businesses_cache[bbox_key].get('timestamp', 0)
-        if time.time() - cached_time < 3600:
-            return businesses_cache[bbox_key].get('businesses', [])
+    # Check cache (extended to 24 hours to minimize Overpass API calls)\n    if bbox_key in businesses_cache:\n        cached_time = businesses_cache[bbox_key].get('timestamp', 0)\n        if time.time() - cached_time < 86400:\n            cached_businesses = businesses_cache[bbox_key].get('businesses', [])\n            print(f\"   ✓ Using cached Overpass data ({len(cached_businesses)} businesses, {int((time.time() - cached_time)/3600)}h old)\")\n            return cached_businesses
     
     north, south, east, west = bbox
     
-    # Overpass QL query for amenities/shops - simplified query for better reliability
+    # Overpass QL query for amenities/shops - fetch all business types
     # Include [timeout:60][out:json] directives in proper Overpass QL format
     query = f"""[bbox:{south},{west},{north},{east}][timeout:60][out:json];
-node["amenity"~"cafe|restaurant|shop|bank"];
+(
+  node["shop"];
+  node["amenity"~"cafe|restaurant|bar|pub|fast_food|food_court|bank|pharmacy|cinema|theatre|library|post_office"];
+);
 out center;
     """
     
@@ -381,7 +580,7 @@ out center;
     businesses_cache[bbox_key]['timestamp'] = time.time()
     _save_json_cache(BUSINESSES_CACHE_FILE, businesses_cache)
     
-    print(f"   Fetched {len(businesses)} open businesses for bbox {bbox_key}")
+    print(f"   ✓ Fetched {len(businesses)} businesses from Overpass API")
     return businesses
 
 

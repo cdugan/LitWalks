@@ -8,6 +8,7 @@ let endMarker;
 let fastestRouteLayer;
 let safestRouteLayer; // will be a LayerGroup containing halo + route
 let lightsLayer;
+let businessesLayer = null;
 let boundaryBox; // boundary rectangle layer
 let mapClickMode = null; // 'start' or 'end' for map picking mode
 const BBOX = window.APP_BBOX || [35.42, 35.28, -82.40, -82.55]; // [north, south, east, west] - fallback to Hendersonville if not set
@@ -68,6 +69,39 @@ function initMap() {
     loadGraphData();
 }
 
+// Function to load and display businesses
+async function loadBusinesses() {
+    try {
+        const response = await fetch('/api/businesses');
+        const data = await response.json();
+        
+        if (data && data.length > 0) {
+            const businessMarkers = data.map(business => {
+                let popup = `<b>${business.name || 'Unknown Business'}</b><br>`;
+                if (business.type) popup += `Type: ${business.type}<br>`;
+                if (business.hours && business.hours.length > 0) {
+                    popup += `Hours:<br>${business.hours.slice(0, 7).join('<br>')}`;
+                }
+                
+                const marker = L.circleMarker([business.lat, business.lon], {
+                    radius: 5,
+                    fillColor: '#FF00FF',
+                    color: '#C000FF',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillOpacity: 0.8
+                });
+                marker.bindPopup(popup);
+                return marker;
+            });
+            businessesLayer = L.featureGroup(businessMarkers).addTo(map);
+            console.log('Added', data.length, 'open businesses');
+        }
+    } catch (error) {
+        console.error('Error loading businesses:', error);
+    }
+}
+
 // Load graph data from backend
 async function loadGraphData() {
     try {
@@ -109,7 +143,8 @@ async function loadGraphData() {
                         const highwayRisk = props.highway_risk !== undefined ? props.highway_risk.toFixed(3) : 'N/A';
                         const landLabel = props.land_label || 'Unknown';
                         const sidewalkScore = props.sidewalk_score !== undefined ? (props.sidewalk_score * 100).toFixed(0) : 'N/A';
-                        const businessScore = props.business_score !== undefined ? (props.business_score * 100).toFixed(0) : 'N/A';
+                        const bizCount = props.business_count !== undefined ? props.business_count : 0;
+                        const bizName = props.business_name || null;
                         let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
                         popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
                         popup += `Safety Score: ${safetyScore}<br>`;
@@ -124,7 +159,7 @@ async function loadGraphData() {
                         popup += `Streetlights: ${lightCount}<br>`;
                         popup += `Lighting: ${darknessScore}<br>`;
                         popup += `Sidewalk: ${sidewalkScore}%<br>`;
-                        popup += `Nearby Businesses: ${businessScore}%<br>`;
+                        popup += `Nearby Businesses: ${bizCount}` + (bizName ? ` (e.g., ${bizName})` : '') + `<br>`;
                         popup += `Land Use: ${landLabel}`;
                         layer.bindPopup(popup);
                     }
@@ -158,6 +193,16 @@ async function loadGraphData() {
             } catch (lightsErr) {
                 console.error('Error adding lights:', lightsErr);
             }
+            
+            // Add businesses on initial load (if checkbox is checked)
+            try {
+                const businessesToggle = document.getElementById('businessesToggle');
+                if (businessesToggle && businessesToggle.checked) {
+                    loadBusinesses();
+                }
+            } catch (businessErr) {
+                console.error('Error loading initial businesses:', businessErr);
+            }
 
             // Hint to the console that this is the lite payload; fetch full graph in background
             console.log('Loaded lite graph; fetching full graph in background');
@@ -182,7 +227,9 @@ async function loadGraphData() {
                             const landLabel = props.land_label || 'Unknown';
                             // Check both boolean and number representations
                             const isFootpath = (props.is_footpath === true || props.is_footpath === 1 || props.sidewalk_score === 1.0) ? 'Yes' : 'No';
-                            const businessScore = props.business_score !== undefined ? (props.business_score * 100).toFixed(0) : 'N/A';
+                            const bizCount = props.business_count !== undefined ? props.business_count : 0;
+                            const bizName = props.business_name || null;
+                            const speedRisk = props.speed_risk !== undefined ? (props.speed_risk * 100).toFixed(0) : 'N/A';
                             const highwayTag = props.highway || 'unknown';
                             let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
                             popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
@@ -199,7 +246,8 @@ async function loadGraphData() {
                             popup += `Streetlights: ${lightCount}<br>`;
                             popup += `Lighting: ${darknessScore}<br>`;
                             popup += `Footpath: ${isFootpath} (score: ${props.sidewalk_score})<br>`;
-                            popup += `Nearby Businesses: ${businessScore}%<br>`;
+                            popup += `Nearby Businesses: ${bizCount}` + (bizName ? ` (e.g., ${bizName})` : '') + `<br>`;
+                            popup += `Speed Risk: ${speedRisk}%<br>`;
                             popup += `Land Use: ${landLabel}`;
                             layer.bindPopup(popup);
                         }
@@ -359,11 +407,12 @@ async function computeRoutes() {
         const start = parseInput(startInput);
         const end = parseInput(endInput);
         
-        // Get departure time if specified
+        // Get departure time if specified (datetime-local is in Eastern time already)
         const departureTimeInput = document.getElementById('departureTimeInput');
         let departureTime = null;
         if (departureTimeInput && departureTimeInput.value) {
-            departureTime = new Date(departureTimeInput.value).toISOString();
+            departureTime = datetimeLocalToISO(departureTimeInput.value);
+            console.log(`Departure time (local): ${departureTimeInput.value}, (ISO UTC): ${departureTime}, (Eastern): ${formatEasternTime(departureTime)}`);
         }
 
         const response = await fetch('/api/routes', {
@@ -500,6 +549,52 @@ async function computeRoutes() {
         }
     }
 
+}
+
+// Convert local time to ISO UTC for backend; datetime-local is in local TZ already
+function datetimeLocalToISO(datetimeLocalStr) {
+    if (!datetimeLocalStr) return null;
+    const d = new Date(datetimeLocalStr); // datetime-local is interpreted as local time
+    return d.toISOString();
+}
+
+// Format ISO time as readable Eastern time
+function formatEasternTime(isoString) {
+    if (!isoString) return '';
+    const d = new Date(isoString);
+    // Use en-US with Eastern timezone
+    const opts = {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+    };
+    return d.toLocaleString('en-US', opts);
+}
+
+// Get current time in Eastern timezone as datetime-local string (for input field)
+function getNowEastern() {
+    const now = new Date();
+    // Create Eastern time using Intl.DateTimeFormat
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+    const parts = formatter.formatToParts(now);
+    const map = {};
+    parts.forEach(p => map[p.type] = p.value);
+    // Construct datetime-local format: YYYY-MM-DDTHH:mm
+    return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}`;
 }
 
 // Parse input - could be address or coordinates
@@ -669,83 +764,36 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.key === 'Enter') computeRoutes();
     });
     
-    // Departure time button - set to current time
+    // Departure time button - set to current Eastern time
     const currentTimeBtn = document.getElementById('currentTimeBtn');
     if (currentTimeBtn) {
         currentTimeBtn.addEventListener('click', function() {
-            const now = new Date();
-            const isoString = now.toISOString().slice(0, 16); // Format: YYYY-MM-DDTHH:mm
-            document.getElementById('departureTimeInput').value = isoString;
+            const easternNow = getNowEastern();
+            document.getElementById('departureTimeInput').value = easternNow;
         });
     }
     
-    // Set default departure time to current time
+    // Set default departure time to current Eastern time
     const departureTimeInput = document.getElementById('departureTimeInput');
     if (departureTimeInput && !departureTimeInput.value) {
-        const now = new Date();
-        const isoString = now.toISOString().slice(0, 16);
-        departureTimeInput.value = isoString;
+        const easternNow = getNowEastern();
+        departureTimeInput.value = easternNow;
     }
     
-    // Sidewalks toggle
-    let sidewalkLayer = null;
-    const sidewalksToggle = document.getElementById('sidewalksToggle');
-    if (sidewalksToggle) {
-        sidewalksToggle.addEventListener('change', async function() {
-            if (this.checked) {
-                // Fetch and display sidewalk data
-                try {
-                    const response = await fetch('/api/sidewalks');
-                    const data = await response.json();
-                    
-                    sidewalkLayer = L.geoJSON(data, {
-                        style: {
-                            color: '#0066FF',
-                            weight: 3,
-                            opacity: 0.6
-                        }
-                    }).addTo(map);
-                    console.log('Sidewalk layer added');
-                } catch (error) {
-                    console.error('Error loading sidewalks:', error);
-                }
-            } else {
-                // Remove sidewalk layer
-                if (sidewalkLayer) {
-                    map.removeLayer(sidewalkLayer);
-                    sidewalkLayer = null;
-                }
-            }
-        });
-    }
-    
-    // Businesses toggle
-    let businessLayer = null;
+    // Businesses toggle - show as dots like streetlights
     const businessesToggle = document.getElementById('businessesToggle');
     if (businessesToggle) {
         businessesToggle.addEventListener('change', async function() {
             if (this.checked) {
-                // Fetch and display business data
-                try {
-                    const response = await fetch('/api/businesses');
-                    const data = await response.json();
-                    
-                    businessLayer = L.geoJSON(data, {
-                        style: {
-                            color: '#FFA500',
-                            weight: 3,
-                            opacity: 0.6
-                        }
-                    }).addTo(map);
-                    console.log('Business layer added');
-                } catch (error) {
-                    console.error('Error loading businesses:', error);
+                // Load businesses if not already loaded
+                if (!businessesLayer) {
+                    await loadBusinesses();
                 }
             } else {
                 // Remove business layer
-                if (businessLayer) {
-                    map.removeLayer(businessLayer);
-                    businessLayer = null;
+                if (businessesLayer) {
+                    map.removeLayer(businessesLayer);
+                    businessesLayer = null;
                 }
             }
         });

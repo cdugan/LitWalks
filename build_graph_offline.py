@@ -16,9 +16,17 @@ KEEP_ATTRS = {
     'geometry',           # For rendering and route geometry
     'length',             # For distance/travel_time calculations
     'travel_time',        # For routing weight
-        'danger_score',       # For danger visualization (higher = more dangerous)
+    'danger_score',       # For danger visualization (higher = more dangerous)
+    'light_count',        # For debug visualization
+    'darkness_score',     # For component breakdown
+    'sidewalk_score',     # For walking metrics
+    'business_score',     # For walking metrics
+    'business_count',     # Number of businesses near edge
+    'business_name',      # Example business name near edge
+    'business_hours',     # Opening hours for time-based filtering during routing
     'land_risk',          # For component breakdown
     'land_label',         # For component breakdown
+    'speed_risk',         # For speed limit danger
     'speed_kph',          # For reference
     'name',               # For street name
     'optimized_weight',   # For routing (safety-adjusted)
@@ -78,12 +86,13 @@ if __name__ == '__main__':
     # Build the full graph with all scoring
     print("[1] Building graph with build_safe_graph()...")
     start = time.time()
-    G, lights = build_safe_graph(BBOX)
+    G, lights, businesses = build_safe_graph(BBOX)
     elapsed = time.time() - start
     print(f"    Done in {elapsed:.2f}s")
     print(f"    Nodes: {len(G.nodes())}")
     print(f"    Edges: {len(G.edges())}")
     print(f"    Lights: {len(lights) if lights else 0}")
+    print(f"    Businesses: {len(businesses) if businesses else 0}")
     print()
     
     # Strip to minimal attributes
@@ -101,15 +110,15 @@ if __name__ == '__main__':
     output_file = 'graph_prebuilt.pkl'
     print(f"[4] Saving to {output_file}...")
     with open(output_file, 'wb') as f:
-        pickle.dump((G, lights, BBOX), f)
+        pickle.dump((G, lights, businesses, BBOX), f)
     print(f"    Done!")
     print()
     
     # Verify by loading
     print("[5] Verifying by loading...")
     with open(output_file, 'rb') as f:
-        G_loaded, lights_loaded, bbox_loaded = pickle.load(f)
-    print(f"    Loaded: nodes={len(G_loaded.nodes())} edges={len(G_loaded.edges())} lights={len(lights_loaded) if lights_loaded else 0}")
+        G_loaded, lights_loaded, businesses_loaded, bbox_loaded = pickle.load(f)
+    print(f"    Loaded: nodes={len(G_loaded.nodes())} edges={len(G_loaded.edges())} lights={len(lights_loaded) if lights_loaded else 0} businesses={len(businesses_loaded) if businesses_loaded else 0}")
     print(f"    BBOX matches: {bbox_loaded == BBOX}")
     print()
     
