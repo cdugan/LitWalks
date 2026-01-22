@@ -393,6 +393,26 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
         "Content-Type": "application/json",
         "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.types,places.userRatingCount"
     }
+    
+    def _fetch_place_details(place_id):
+        """Fetch opening hours for a specific place."""
+        try:
+            details_url = f"https://places.googleapis.com/v1/places/{place_id}"
+            details_headers = {
+                "X-Goog-Api-Key": api_key,
+                "X-Goog-FieldMask": "regularOpeningHours,currentOpeningHours"
+            }
+            resp = requests.get(details_url, headers=details_headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                # Try regularOpeningHours first, fall back to currentOpeningHours
+                opening_hours = data.get("regularOpeningHours", data.get("currentOpeningHours", {}))
+                periods = opening_hours.get("periods", [])
+                return periods
+            return []
+        except Exception as e:
+            print(f"   ERROR: Failed to fetch details for place {place_id}: {e}")
+            return []
 
     def _do_request(center_lat, center_lon, radius):
         try:
@@ -418,27 +438,47 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
             }
             
             resp = requests.post(base_url, json=payload, headers=headers, timeout=30)
-            data = resp.json()
             
-            # Log API response details for debugging
+            # Check status code before trying to parse JSON
             if resp.status_code != 200:
-                print(f"   DEBUG: Google Places API response - HTTP {resp.status_code}")
-                if 'error' in data:
-                    error_msg = data['error'].get('message', 'No error message provided')
-                    print(f"   ⚠️ Google Places error: {error_msg}")
+                print(f"   ERROR: HTTP {resp.status_code} at ({center_lat:.5f}, {center_lon:.5f})")
+                try:
+                    data = resp.json()
+                    if 'error' in data:
+                        print(f"   ERROR: {data['error']}")
+                except:
+                    print(f"   ERROR: Response text: {resp.text[:300]}")
                 return None
             
+            data = resp.json()
             result_count = len(data.get('places', []))
             
             return data
         except Exception as e:
-            print(f"   ⚠️ Google Places error: {e}")
+            print(f"   ERROR: Exception at ({center_lat:.5f}, {center_lon:.5f}): {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
-    # Use a fine grid of circles to ensure comprehensive coverage
-    # For a ~1 mile square area, use 3x3 grid with 300m radius (overlapping circles)
-    lat_steps = 3
-    lon_steps = 3
+    # Use a fine grid of circles with fixed 120m radius
+    # Calculate grid size based on bbox dimensions to ensure full coverage
+    import math
+    
+    # Fixed search radius optimized for business density
+    FIXED_RADIUS = 120  # meters
+    
+    lat_diff = north - south
+    lon_diff = east - west
+    
+    # Convert bbox dimensions to meters
+    bbox_lat_meters = lat_diff * 111000
+    bbox_lon_meters = lon_diff * 111000 * math.cos(math.radians((north + south) / 2))
+    
+    # Calculate grid steps needed: each cell should be ~2*radius to ensure overlap
+    # Add 1 to ensure we have enough coverage at edges
+    lat_steps = max(3, int(math.ceil(bbox_lat_meters / (2 * FIXED_RADIUS))) + 1)
+    lon_steps = max(3, int(math.ceil(bbox_lon_meters / (2 * FIXED_RADIUS))) + 1)
+    
     lat_min, lat_max = south, north
     lon_min, lon_max = west, east
 
@@ -451,15 +491,33 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
     centers = [(lat, lon) for lat in linspace(lat_min, lat_max, lat_steps)
                            for lon in linspace(lon_min, lon_max, lon_steps)]
 
-    print(f"   DEBUG: Using searchNearby with {len(centers)} grid points (radius={radius_m}m)")
+    print(f"   DEBUG: Using searchNearby with {len(centers)} grid points ({lat_steps}x{lon_steps})")
+    print(f"   DEBUG: Bbox size: ~{int(bbox_lat_meters)}m x {int(bbox_lon_meters)}m")
+    print(f"   DEBUG: Fixed radius: {FIXED_RADIUS}m")
+    
+    search_radius = FIXED_RADIUS
     
     for idx, (center_lat, center_lon) in enumerate(centers):
-        print(f"   DEBUG: Grid point {idx+1}/{len(centers)}: ({center_lat:.5f}, {center_lon:.5f})")
-        data = _do_request(center_lat, center_lon, radius_m)
+        # Add small delay to avoid rate limiting (except for first request)
+        if idx > 0:
+            time.sleep(0.1)
+            
+        try:
+            data = _do_request(center_lat, center_lon, search_radius)
+        except Exception as e:
+            print(f"   DEBUG: Grid point {idx+1}/{len(centers)}: ({center_lat:.5f}, {center_lon:.5f}) - Exception: {type(e).__name__}: {e}")
+            continue
+            
         if not data:
+            print(f"   DEBUG: Grid point {idx+1}/{len(centers)}: ({center_lat:.5f}, {center_lon:.5f}) - 0 results")
             continue
             
         places = data.get("places", [])
+        result_count = len(places)
+        print(f"   DEBUG: Grid point {idx+1}/{len(centers)}: ({center_lat:.5f}, {center_lon:.5f}) - {result_count} results")
+        
+        if result_count == 20:
+            print(f"   ⚠️ WARNING: Hit 20 result limit at grid point {idx+1} - may be missing businesses!")
         total_raw_results += len(places)
         
         for place in places:
@@ -489,13 +547,18 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
             # Filter by minimum review count only
             if review_count < min_reviews:
                 filtered_by_review_count += 1
+                print(f"   DEBUG: Filtered '{name}' - {review_count} reviews (min: {min_reviews})")
                 continue
             
             # Check if already seen (deduplication across grid searches)
             if place_id in all_results:
                 continue
             
-            all_results[place_id] = (lat, lon, name, primary_type, [], review_count, None)
+            # Fetch opening hours from Place Details API (with rate limiting)
+            opening_hours = _fetch_place_details(place_id)
+            time.sleep(0.05)  # Small delay to avoid rate limiting Place Details API
+            
+            all_results[place_id] = (lat, lon, name, primary_type, opening_hours, review_count, None)
 
     businesses = list(all_results.values())
     

@@ -72,7 +72,16 @@ function initMap() {
 // Function to load and display businesses
 async function loadBusinesses() {
     try {
-        const response = await fetch('/api/businesses');
+        // Get departure time if specified
+        const departureTimeInput = document.getElementById('departureTimeInput');
+        let url = '/api/businesses';
+        if (departureTimeInput && departureTimeInput.value) {
+            const departureTime = datetimeLocalToISO(departureTimeInput.value);
+            url += `?departure_time=${encodeURIComponent(departureTime)}`;
+            console.log(`Loading businesses open at: ${departureTime}`);
+        }
+        
+        const response = await fetch(url);
         const data = await response.json();
         
         if (data && data.length > 0) {

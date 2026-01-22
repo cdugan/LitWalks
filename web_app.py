@@ -12,6 +12,7 @@ import json
 import os
 import psutil
 import networkx as nx
+from datetime import datetime
 from route_visualizer import (
     geocode_address, snap_to_nearest_node, get_osrm_route, 
     snap_osrm_route_to_graph
@@ -33,6 +34,65 @@ CORS(app)
 
 _mem_after_flask = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 print(f"[startup] Memory after Flask/CORS: {_mem_after_flask:.1f} MB (D +{_mem_after_flask - _mem_after_config:.1f} MB)")
+
+# --- Helper functions ---
+
+def is_business_open_at_time(opening_hours, check_time):
+    """Check if a business is open at a given time.
+    
+    Args:
+        opening_hours: List of period dicts from Google Places API
+            Each period has: {"open": {"day": 0-6, "hour": 0-23, "minute": 0-59}, 
+                             "close": {"day": 0-6, "hour": 0-23, "minute": 0-59}}
+        check_time: datetime object or ISO format string
+    
+    Returns:
+        bool: True if open at check_time, False otherwise (or if hours unknown)
+    """
+    if not opening_hours:
+        # No hours data available - assume open for backward compatibility
+        return True
+    
+    # Parse check_time if it's a string
+    if isinstance(check_time, str):
+        try:
+            check_time = datetime.fromisoformat(check_time.replace('Z', '+00:00'))
+        except:
+            print(f"Warning: Could not parse time '{check_time}'")
+            return True
+    
+    # Get day of week (0=Monday in Python, but Google uses 0=Sunday)
+    check_day = (check_time.weekday() + 1) % 7  # Convert Python's Monday=0 to Google's Sunday=0
+    check_minutes = check_time.hour * 60 + check_time.minute
+    
+    # Check each period to see if we're in an open window
+    for period in opening_hours:
+        open_info = period.get("open", {})
+        close_info = period.get("close", {})
+        
+        if not open_info or not close_info:
+            continue
+            
+        open_day = open_info.get("day", -1)
+        open_minutes = open_info.get("hour", 0) * 60 + open_info.get("minute", 0)
+        close_day = close_info.get("day", -1)
+        close_minutes = close_info.get("hour", 0) * 60 + close_info.get("minute", 0)
+        
+        # Handle same-day hours
+        if open_day == close_day == check_day:
+            if open_minutes <= check_minutes < close_minutes:
+                return True
+        
+        # Handle hours that span midnight
+        elif open_day != close_day:
+            # Check if we're on the opening day after opening time
+            if check_day == open_day and check_minutes >= open_minutes:
+                return True
+            # Check if we're on the closing day before closing time
+            elif check_day == close_day and check_minutes < close_minutes:
+                return True
+    
+    return False
 
 # --- Pre-built graph loading ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
@@ -575,9 +635,12 @@ def api_sidewalks():
 
 @app.route('/api/businesses', methods=['GET'])
 def api_businesses():
-    """Return list of individual business points."""
+    """Return list of individual business points, optionally filtered by opening hours."""
     try:
         global _businesses_cache
+        
+        # Get optional departure_time parameter
+        departure_time = request.args.get('departure_time')
         
         # Return businesses as simple list of dicts
         business_list = []
@@ -589,6 +652,11 @@ def api_businesses():
                     hours = biz[4] if len(biz) > 4 else []
                     review_count = biz[5] if len(biz) > 5 else 0
                     is_open = biz[6] if len(biz) > 6 else True
+                    
+                    # Filter by departure_time if provided
+                    if departure_time:
+                        if not is_business_open_at_time(hours, departure_time):
+                            continue  # Skip closed businesses
                     
                     business_list.append({
                         'lat': lat,
@@ -603,6 +671,8 @@ def api_businesses():
         return jsonify(business_list)
     except Exception as e:
         print(f"Error fetching businesses: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
