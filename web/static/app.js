@@ -807,4 +807,20 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
+    
+    // Departure time change - reload businesses if visible
+    const departureTimeInput = document.getElementById('departureTimeInput');
+    if (departureTimeInput) {
+        departureTimeInput.addEventListener('change', async function() {
+            // Only reload if businesses are currently visible
+            if (businessesToggle && businessesToggle.checked && businessesLayer) {
+                console.log('Departure time changed, reloading businesses...');
+                // Remove old layer
+                map.removeLayer(businessesLayer);
+                businessesLayer = null;
+                // Reload with new time
+                await loadBusinesses();
+            }
+        });
+    }
 });
