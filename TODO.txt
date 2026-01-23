@@ -1,0 +1,3 @@
+1/22/26
+- Reduce Gmaps review filter to min 50 (or 100) reviews instead of 500.
+- 

@@ -57,6 +57,7 @@ def get_pedestrian_street_type_score(highway_value):
     pedestrian_friendly = {
         "footway": 1.0,      # Dedicated pedestrian path
         "path": 0.95,        # General path, usually pedestrian-safe
+        "cycleway": 0.9,     # Cycleways are pedestrian-friendly
         "residential": 0.85, # Residential streets are pedestrian-friendly
         "living_street": 0.9, # Living streets prioritize pedestrians
         "unclassified": 0.7, # Small local roads
@@ -222,9 +223,13 @@ def build_safe_graph(bbox):
     print(f"1. Downloading street network for {bbox}...")
 
     # osmnx expects a tuple containing (west, south, east, north)
-    # Use 'walk' network to include footways, paths, and pedestrian infrastructure
-    # This captures sidewalks as separate features, not just roads
-    G = graph_from_bbox((west, south, east, north), network_type='walk', simplify=True)
+    # Use custom filter to include walking highways AND cycleways with foot access
+    # This gets footways, paths, residential, and cycleways (excluding foot=no)
+    custom_filter = (
+        '["highway"~"footway|pedestrian|living_street|steps|track|path|residential|service|cycleway"]'
+        '["foot"!~"no"]'
+    )
+    G = graph_from_bbox((west, south, east, north), custom_filter=custom_filter, simplify=True)
     mem_after_osm = _get_mem_mb()
     print(f"   ✓ OSM graph downloaded: {len(G.nodes())} nodes, {len(G.edges())} edges [mem: {mem_after_osm:.1f} MB, Δ +{mem_after_osm - mem_start:.1f} MB]")
 
@@ -783,11 +788,8 @@ def build_safe_graph(bbox):
     mem_after_nlcd_del = _get_mem_mb()
     print(f"   ✓ NLCD raster released [mem: {mem_after_nlcd_del:.1f} MB, Δ {mem_after_nlcd_del - mem_before_nlcd_del:.1f} MB]")
 
-    # Create an optimized routing weight (travel_time scaled by safety)
-    for u, v, k, data in G_proj.edges(keys=True, data=True):
-        time_sec = data.get('travel_time', 1)
-        safety_factor = 1.0 + (data.get('safety_score', 100.0) / 100.0)
-        data['optimized_weight'] = time_sec * safety_factor
+    # Note: optimized_weight already calculated at line 723 with proper road penalty
+    # Don't recalculate here - the formula with 10x road penalty is correct
 
     # Return graph in lat/lon for plotting and routing convenience
     mem_before_reproject = _get_mem_mb()

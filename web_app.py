@@ -127,6 +127,138 @@ def is_business_open_at_time(opening_hours, check_time):
         # On any error, assume open to avoid breaking the app
         return True
 
+# --- Business Score Recalculation ---
+
+def _recalculate_business_scores(G, businesses, departure_time):
+    """Recalculate business proximity scores based on open businesses at departure_time.
+    
+    This creates a modified copy of the graph with updated business_score and 
+    recalculated danger_score/optimized_weight based on which businesses are open.
+    
+    Args:
+        G: NetworkX graph with pre-calculated scores
+        businesses: List of business tuples (lat, lon, name, type, hours, review_count, is_open)
+        departure_time: ISO format datetime string
+    
+    Returns:
+        Modified graph with updated scores
+    """
+    import copy
+    from math import radians, cos, sin, asin, sqrt
+    
+    # Constants from graph_builder (should match)
+    W_DARKNESS = 40.0
+    W_SIDEWALK = 30.0
+    W_BUSINESS = 15.0
+    W_LAND = 10.0
+    W_SPEED = 5.0
+    DANGER_MULTIPLIER = 3.0
+    PROXIMITY_THRESHOLD_KM = 0.1  # 100m - businesses within this radius affect safety
+    
+    def haversine_km(lat1, lon1, lat2, lon2):
+        """Calculate distance between two points in km."""
+        lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        return c * 6371  # Earth radius in km
+    
+    # Filter to only open businesses
+    open_businesses = []
+    for biz in businesses:
+        if len(biz) >= 7:
+            lat, lon, name, btype, hours, review_count, is_open = biz[:7]
+            if is_business_open_at_time(hours, departure_time):
+                open_businesses.append((lat, lon, name))
+    
+    print(f"  Open businesses at {departure_time}: {len(open_businesses)}/{len(businesses)}")
+    
+    # Recalculate business scores for all edges
+    edges_updated = 0
+    score_changes = []  # Track some score changes for debugging
+    for u, v, k, data in G.edges(keys=True, data=True):
+        # Store original danger score for comparison
+        original_danger = data.get('danger_score', 0)
+        
+        # Get edge midpoint
+        if 'geometry' in data and hasattr(data['geometry'], 'coords'):
+            coords = list(data['geometry'].coords)
+            mid_idx = len(coords) // 2
+            edge_lat, edge_lon = coords[mid_idx][1], coords[mid_idx][0]  # (x, y) = (lon, lat)
+        else:
+            # Fallback: use node coordinates
+            node_u_data = G.nodes[u]
+            node_v_data = G.nodes[v]
+            edge_lat = (node_u_data.get('y', 0) + node_v_data.get('y', 0)) / 2
+            edge_lon = (node_u_data.get('x', 0) + node_v_data.get('x', 0)) / 2
+        
+        # Count open businesses within proximity threshold
+        nearby_count = 0
+        for biz_lat, biz_lon, biz_name in open_businesses:
+            dist = haversine_km(edge_lat, edge_lon, biz_lat, biz_lon)
+            if dist <= PROXIMITY_THRESHOLD_KM:
+                nearby_count += 1
+        
+        # Calculate new business score (same logic as graph_builder)
+        if nearby_count > 0:
+            business_score = 0.9  # Good: near open businesses
+        else:
+            business_score = 0.3  # Poor: isolated area
+        
+        # Get other pre-calculated components
+        darkness_score = data.get('darkness_score', 0.5)
+        sidewalk_score = data.get('sidewalk_score', 0.5)
+        land_risk = data.get('land_risk', 0.5)
+        speed_risk = data.get('speed_risk', 0.5)
+        travel_time = data.get('travel_time', 1)
+        
+        # Recalculate danger score with new business component
+        danger = (
+            W_DARKNESS * darkness_score +
+            W_SIDEWALK * (1.0 - sidewalk_score) +
+            W_BUSINESS * (1.0 - business_score) +  # Updated component
+            W_LAND * land_risk +
+            W_SPEED * speed_risk
+        )
+        
+        # Recalculate optimized weight (for routing) - match graph_builder.py formula
+        # Apply 10x penalty for roads vs footpaths, divide by safety (higher safety = lower weight)
+        is_footpath = (sidewalk_score >= 0.99)
+        road_penalty = 1.0 if is_footpath else 10.0
+        safety_for_routing = 100.0 - danger
+        optimized_weight = travel_time * road_penalty / (safety_for_routing + 0.01)
+        
+        # Update edge data
+        data['business_score'] = business_score
+        data['business_count'] = nearby_count
+        data['danger_score'] = danger
+        data['optimized_weight'] = optimized_weight
+        
+        # Also update safety_score (inverse of danger, used for visualization)
+        data['safety_score'] = 100 - danger
+        
+        # Track significant changes for debugging
+        if len(score_changes) < 5 and abs(danger - original_danger) > 1.0:
+            score_changes.append({
+                'edge': f"{u}->{v}",
+                'old_danger': original_danger,
+                'new_danger': danger,
+                'old_biz': data.get('business_score', 0.5),
+                'new_biz': business_score,
+                'nearby': nearby_count
+            })
+        
+        edges_updated += 1
+    
+    print(f"  Updated business scores for {edges_updated} edges")
+    if score_changes:
+        print(f"  Sample score changes:")
+        for change in score_changes:
+            print(f"    {change['edge']}: danger {change['old_danger']:.1f}->{change['new_danger']:.1f}, biz {change['old_biz']:.2f}->{change['new_biz']:.2f}, nearby={change['nearby']}")
+    
+    return G
+
 # --- Pre-built graph loading ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
 _graph_cache = {}
@@ -461,18 +593,31 @@ def index():
 def api_graph_data():
     """Get the road network graph as GeoJSON.
     
-    Response is cached since the graph is fixed.
+    Query parameters:
+        departure_time: Optional ISO datetime to recalculate business scores
+    
+    Response is cached when no departure_time is provided.
     """
-    # Return cached response if available
-    if 'graph-data' in _geojson_cache:
+    departure_time = request.args.get('departure_time')
+    
+    # Return cached response if available and no departure_time
+    if not departure_time and 'graph-data' in _geojson_cache:
         print('[api] /api/graph-data request received (cached)')
         cached_response, cached_size = _geojson_cache['graph-data']
         return jsonify(cached_response)
     
     try:
         t0 = time.time()
-        print('[api] /api/graph-data request received (building cache)')
+        if departure_time:
+            print(f'[api] /api/graph-data request received with departure_time={departure_time}')
+        else:
+            print('[api] /api/graph-data request received (building cache)')
+        
         G, lights = _get_graph()
+        
+        # Recalculate business scores if departure_time provided
+        if departure_time and _businesses_cache:
+            G = _recalculate_business_scores(G, _businesses_cache, departure_time)
 
         # Build response with graph edges, lights, and bbox
         edges_fc = graph_to_geojson(G)
@@ -484,15 +629,19 @@ def api_graph_data():
             "status": "success"
         }
 
-        # Cache the response for future requests
-        try:
-            payload = json.dumps(response)
-            size = len(payload)
-            _geojson_cache['graph-data'] = (response, size)
-        except Exception:
-            size = None
+        # Cache the response only if no departure_time
+        if not departure_time:
+            try:
+                payload = json.dumps(response)
+                size = len(payload)
+                _geojson_cache['graph-data'] = (response, size)
+            except Exception:
+                size = None
+        else:
+            size = len(json.dumps(response))
+            
         elapsed = time.time() - t0
-        print(f"[api] /api/graph-data cached — edges={len(edges_fc.get('features',[]))} bytes={size} time_s={elapsed:.2f}")
+        print(f"[api] /api/graph-data {'cached' if not departure_time else 'computed'} — edges={len(edges_fc.get('features',[]))} bytes={size} time_s={elapsed:.2f}")
         return jsonify(response)
     except Exception as e:
         print(f"[api] /api/graph-data error: {e}")
@@ -863,6 +1012,12 @@ def api_routes():
         # Get graph
         G, lights = _get_graph()
         
+        # If departure_time is provided, recalculate business proximity scores
+        # based on which businesses are actually open at that time
+        if departure_time and _businesses_cache:
+            print(f"  Recalculating business scores for departure_time: {departure_time}")
+            G = _recalculate_business_scores(G, _businesses_cache, departure_time)
+        
         # Snap to nearest nodes
         print(f"Snapping ({start_lat}, {start_lon}) and ({end_lat}, {end_lon}) to graph...")
         start_node = snap_to_nearest_node(G, start_lat, start_lon)
@@ -920,20 +1075,51 @@ def api_routes():
             
             print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
 
+            # Track some weights for debugging
+            debug_weights = []
+
             def fastest_weight(u, v, data_attr):
                 data = normalize_edge_data(data_attr)
-                t = (data.get('travel_time', 0) / max_time) if max_time > 0 else 0
-                return t  # Pure time, no safety component
+                
+                # ALWAYS recalculate weight - don't trust pre-built optimized_weight
+                # It may have been built with the old buggy formula
+                travel_time = data.get('travel_time', 1)
+                danger = data.get('danger_score', 50)
+                sidewalk_score = data.get('sidewalk_score', 0)
+                is_footpath = (sidewalk_score >= 0.99)
+                road_penalty = 1.0 if is_footpath else 10.0
+                safety_for_routing = 100.0 - danger
+                weight = travel_time * road_penalty / (safety_for_routing + 0.01)
+                
+                # Debug log first few edges
+                if len(debug_weights) < 10:
+                    highway = data.get('highway', 'unknown')
+                    old_opt = data.get('optimized_weight', 'N/A')
+                    debug_weights.append(f"  Edge {u}->{v}: hw={highway}, footpath={is_footpath}, sidewalk={sidewalk_score:.1f}, danger={danger:.1f}, NEW_weight={weight:.2f}, OLD_opt={old_opt}")
+                
+                return weight
             
             def safest_weight(u, v, data_attr):
                 data = normalize_edge_data(data_attr)
                 length = data.get('length', 1)
-                s_raw = data.get('safety_score', 100)
-                s = (s_raw * length) / (max_safety * max_length) if (max_safety > 0 and max_length > 0) else 0
-                return s  # Pure safety, no time component
+                danger = data.get('danger_score', 50)
+                
+                # Apply 10x penalty to roads (not footpaths) for safest route too
+                sidewalk_score = data.get('sidewalk_score', 0)
+                is_footpath = (sidewalk_score >= 0.99)
+                road_penalty = 1.0 if is_footpath else 10.0
+                
+                # For safest route, HEAVILY penalize danger
+                # Weight = (length * road_penalty * danger) / 100
+                # This makes danger a direct cost multiplier, not just dividing by safety
+                # Danger ranges 0-100, so weight scales appropriately
+                return (length * road_penalty * (danger + 1)) / 100.0
             
             # Compute fastest route
             print("  Computing fastest route (pure time)...")
+            print("\n  Sample edge weights:")
+            for dbg in debug_weights[:10]:
+                print(dbg)
             try:
                 fastest_route = nx.shortest_path(G, start_node, end_node, weight=fastest_weight)
                 fastest_data["nodes"] = fastest_route

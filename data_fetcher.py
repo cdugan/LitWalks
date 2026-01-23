@@ -346,7 +346,7 @@ def _bbox_centroid(bbox):
     return ( (n + s) / 2.0, (e + w) / 2.0 )
 
 
-def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=50, max_reviews=999999):
+def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=25, max_reviews=999999):
     """Fetch businesses in bbox via Google Places API (New).
 
     Uses the new Places API v1 endpoint with searchNearby method.

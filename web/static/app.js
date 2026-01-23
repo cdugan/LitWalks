@@ -261,73 +261,91 @@ async function loadGraphData() {
                 console.error('Error loading initial businesses:', businessErr);
             }
 
-            // Hint to the console that this is the lite payload; fetch full graph in background
-            console.log('Loaded lite graph; fetching full graph in background');
-            fetch('/api/graph-data').then(r => r.json()).then(full => {
-                console.log('/api/graph-data returned', full && full.status);
-                if (full && full.status === 'success') {
-                    // replace graphLayer with full geometry
-                    if (graphLayer) map.removeLayer(graphLayer);
-                    graphLayer = L.geoJSON(full.edges, {
-                        style: function(feature) {
-                            const dangerScore = feature.properties.danger_score || 0;
-                            const color = getDangerColor(dangerScore);
-                            return { color: color, weight: 2.5, opacity: 0.85 };
-                        },
-                        onEachFeature: function(feature, layer) {
-                            const props = feature.properties;
-                            const dangerScore = props.danger_score !== undefined ? props.danger_score.toFixed(1) : 'N/A';
-                            const lightCount = props.light_count || 0;
-                            const curveScore = props.curve_score !== undefined ? props.curve_score.toFixed(3) : 'N/A';
-                            const darknessScore = props.darkness_score !== undefined ? props.darkness_score.toFixed(3) : 'N/A';
-                            const highwayRisk = props.highway_risk !== undefined ? props.highway_risk.toFixed(3) : 'N/A';
-                            const landLabel = props.land_label || 'Unknown';
-                            // Check both boolean and number representations
-                            const isFootpath = (props.is_footpath === true || props.is_footpath === 1 || props.sidewalk_score === 1.0) ? 'Yes' : 'No';
-                            const bizCount = props.business_count !== undefined ? props.business_count : 0;
-                            const bizName = props.business_name || null;
-                            const speedRisk = props.speed_risk !== undefined ? (props.speed_risk * 100).toFixed(0) : 'N/A';
-                            const highwayTag = props.highway || 'unknown';
-                            let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
-                            popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
-                            popup += `Type: ${highwayTag}<br>`;
-                            popup += `Danger Score: ${dangerScore}<br>`;
-                            if (props.length !== undefined) {
-                                popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
-                            }
-                            if (props.travel_time !== undefined) {
-                                const minutes = Math.floor(props.travel_time / 60);
-                                const seconds = Math.round(props.travel_time % 60);
-                                popup += `Walking Time: ${minutes}m ${seconds}s<br>`;
-                            }
-                            popup += `Streetlights: ${lightCount}<br>`;
-                            popup += `Lighting: ${darknessScore}<br>`;
-                            popup += `Footpath: ${isFootpath} (score: ${props.sidewalk_score})<br>`;
-                            popup += `Nearby Businesses: ${bizCount}` + (bizName ? ` (e.g., ${bizName})` : '') + `<br>`;
-                            popup += `Speed Risk: ${speedRisk}%<br>`;
-                            popup += `Land Use: ${landLabel}`;
-                            layer.bindPopup(popup);
-                        }
-                    }).addTo(map);
-                    // hide loader when full graph arrives
-                    if (loader) {
-                        loader.textContent = 'Full map loaded';
-                        setTimeout(() => { loader.style.display = 'none'; }, 600);
-                    }
-                } else if (loader) {
-                    // if full failed, hide loader after a moment and keep lite
-                    setTimeout(() => { loader.style.display = 'none'; }, 600);
-                }
-            }).catch(e => {
-                console.warn('Failed to fetch full graph:', e);
-                if (loader) setTimeout(() => { loader.style.display = 'none'; }, 600);
-            });
+            // Load full graph in background
+            loadFullGraph();
             
             console.log('Graph data loaded successfully');
         }
     } catch (error) {
         console.error('Error loading graph data:', error);
         showError('Failed to load map data');
+    }
+}
+
+// Load full graph with optional departure time
+async function loadFullGraph() {
+    const departureTimeInput = document.getElementById('departureTimeInput');
+    let url = '/api/graph-data';
+    if (departureTimeInput && departureTimeInput.value) {
+        const departureTime = datetimeLocalToISO(departureTimeInput.value);
+        url += `?departure_time=${encodeURIComponent(departureTime)}`;
+        console.log(`Loading full graph for time: ${departureTime}`);
+    } else {
+        console.log('Loading full graph (no time filter)');
+    }
+    
+    try {
+        const response = await fetch(url);
+        const full = await response.json();
+        console.log('/api/graph-data returned', full && full.status);
+        if (full && full.status === 'success') {
+            // Replace graphLayer with full geometry
+            if (graphLayer) map.removeLayer(graphLayer);
+            graphLayer = L.geoJSON(full.edges, {
+                style: function(feature) {
+                    const dangerScore = feature.properties.danger_score || 0;
+                    const color = getDangerColor(dangerScore);
+                    return { color: color, weight: 2.5, opacity: 0.85 };
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    const dangerScore = props.danger_score !== undefined ? props.danger_score.toFixed(1) : 'N/A';
+                    const lightCount = props.light_count || 0;
+                    const curveScore = props.curve_score !== undefined ? props.curve_score.toFixed(3) : 'N/A';
+                    const darknessScore = props.darkness_score !== undefined ? props.darkness_score.toFixed(3) : 'N/A';
+                    const highwayRisk = props.highway_risk !== undefined ? props.highway_risk.toFixed(3) : 'N/A';
+                    const landLabel = props.land_label || 'Unknown';
+                    // Check both boolean and number representations
+                    const isFootpath = (props.is_footpath === true || props.is_footpath === 1 || props.sidewalk_score === 1.0) ? 'Yes' : 'No';
+                    const bizCount = props.business_count !== undefined ? props.business_count : 0;
+                    const bizName = props.business_name || null;
+                    const bizScore = props.business_score !== undefined ? props.business_score.toFixed(2) : 'N/A';
+                    const speedRisk = props.speed_risk !== undefined ? (props.speed_risk * 100).toFixed(0) : 'N/A';
+                    const highwayTag = props.highway || 'unknown';
+                    let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
+                    popup += `<span style="font-size: 0.9em; color: #666;">Walking Safety</span><br>`;
+                    popup += `Type: ${highwayTag}<br>`;
+                    popup += `Danger Score: ${dangerScore}<br>`;
+                    if (props.length !== undefined) {
+                        popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
+                    }
+                    if (props.travel_time !== undefined) {
+                        const minutes = Math.floor(props.travel_time / 60);
+                        const seconds = Math.round(props.travel_time % 60);
+                        popup += `Walking Time: ${minutes}m ${seconds}s<br>`;
+                    }
+                    popup += `Streetlights: ${lightCount}<br>`;
+                    popup += `Lighting: ${darknessScore}<br>`;
+                    popup += `Footpath: ${isFootpath} (score: ${props.sidewalk_score})<br>`;
+                    popup += `Business Proximity: ${bizScore}<br>`;
+                    popup += `Nearby Businesses: ${bizCount}` + (bizName ? ` (e.g., ${bizName})` : '') + `<br>`;
+                    popup += `Speed Risk: ${speedRisk}%<br>`;
+                    popup += `Land Use: ${landLabel}`;
+                    layer.bindPopup(popup);
+                }
+            }).addTo(map);
+            
+            // Hide loader when full graph arrives
+            const loader = document.getElementById('mapLoader');
+            if (loader) {
+                loader.textContent = 'Full map loaded';
+                setTimeout(() => { loader.style.display = 'none'; }, 600);
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to fetch full graph:', e);
+        const loader = document.getElementById('mapLoader');
+        if (loader) setTimeout(() => { loader.style.display = 'none'; }, 600);
     }
 }
 
@@ -827,7 +845,12 @@ document.addEventListener('DOMContentLoaded', function() {
     if (currentTimeBtn) {
         currentTimeBtn.addEventListener('click', function() {
             const easternNow = getNowEastern();
-            document.getElementById('departureTimeInput').value = easternNow;
+            const departureInput = document.getElementById('departureTimeInput');
+            if (departureInput) {
+                departureInput.value = easternNow;
+                // Trigger change so businesses/graph/routes refresh immediately
+                departureInput.dispatchEvent(new Event('change', { bubbles: true }));
+            }
         });
     }
     
@@ -857,17 +880,29 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // Departure time change - reload businesses if visible
+    // Departure time change - reload businesses and graph with time-filtered scores
     if (departureTimeInput) {
         departureTimeInput.addEventListener('change', async function() {
-            // Only reload if businesses are currently visible
-            if (businessesToggle && businessesToggle.checked && businessesLayer) {
-                console.log('Departure time changed, reloading businesses...');
-                // Remove old layer
-                map.removeLayer(businessesLayer);
-                businessesLayer = null;
-                // Reload with new time
+            console.log('Departure time changed, reloading data...');
+            
+            // Reload graph with recalculated business proximity scores
+            await loadFullGraph();
+            
+            // Reload businesses if toggle is on (even if previous layer was empty)
+            if (businessesToggle && businessesToggle.checked) {
+                if (businessesLayer) {
+                    map.removeLayer(businessesLayer);
+                    businessesLayer = null;
+                }
                 await loadBusinesses();
+            }
+            
+            // Recalculate existing routes if any are displayed
+            const startInput = document.getElementById('startInput').value.trim();
+            const endInput = document.getElementById('endInput').value.trim();
+            if ((fastestRouteLayer || safestRouteLayer) && startInput && endInput) {
+                console.log('Recalculating routes with new departure time...');
+                await computeRoutes();
             }
         });
     }
