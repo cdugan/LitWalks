@@ -1,5 +1,5 @@
 // LitRoutes Web App - Main Application Logic
-console.log('app.js loaded');
+console.log('[DEBUG] app.js loaded - starting initialization');
 
 let map;
 let graphLayer;
@@ -21,9 +21,11 @@ function isWithinBounds(lat, lon) {
 
 // Initialize map
 function initMap() {
+    console.log('[DEBUG] initMap() called');
     // Calculate center and zoom from bbox
     const [north, south, east, west] = BBOX;
     const center = [(north + south) / 2, (east + west) / 2];
+    console.log('[DEBUG] BBOX:', BBOX, 'Center:', center);
     
     map = L.map('map').setView(center, 13);
     
@@ -66,11 +68,51 @@ function initMap() {
     });
     
     // Load initial graph data
+    console.log('[DEBUG] Calling loadGraphData()');
     loadGraphData();
+}
+
+// Format opening hours periods into readable text
+function formatOpeningHours(periods) {
+    if (!periods || !Array.isArray(periods) || periods.length === 0) {
+        return 'Hours not available';
+    }
+    
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const hoursByDay = {};
+    
+    // Group periods by day
+    periods.forEach(period => {
+        if (period.open && period.open.day !== undefined) {
+            const day = period.open.day;
+            const openHour = String(period.open.hour || 0).padStart(2, '0');
+            const openMin = String(period.open.minute || 0).padStart(2, '0');
+            const closeHour = period.close ? String(period.close.hour || 0).padStart(2, '0') : '23';
+            const closeMin = period.close ? String(period.close.minute || 0).padStart(2, '0') : '59';
+            
+            const timeStr = `${openHour}:${openMin}-${closeHour}:${closeMin}`;
+            
+            if (!hoursByDay[day]) {
+                hoursByDay[day] = [];
+            }
+            hoursByDay[day].push(timeStr);
+        }
+    });
+    
+    // Format as list of days
+    const formatted = [];
+    for (let day = 0; day < 7; day++) {
+        if (hoursByDay[day]) {
+            formatted.push(`${dayNames[day]}: ${hoursByDay[day].join(', ')}`);
+        }
+    }
+    
+    return formatted.length > 0 ? formatted.join('<br>') : 'Hours not available';
 }
 
 // Function to load and display businesses
 async function loadBusinesses() {
+    console.log('[DEBUG] loadBusinesses() called');
     try {
         // Get departure time if specified
         const departureTimeInput = document.getElementById('departureTimeInput');
@@ -89,7 +131,9 @@ async function loadBusinesses() {
                 let popup = `<b>${business.name || 'Unknown Business'}</b><br>`;
                 if (business.type) popup += `Type: ${business.type}<br>`;
                 if (business.hours && business.hours.length > 0) {
-                    popup += `Hours:<br>${business.hours.slice(0, 7).join('<br>')}`;
+                    popup += `Hours:<br><span style="font-size: 0.9em;">${formatOpeningHours(business.hours)}</span>`;
+                } else {
+                    popup += `Hours: Not available`;
                 }
                 
                 const marker = L.circleMarker([business.lat, business.lon], {
@@ -113,16 +157,20 @@ async function loadBusinesses() {
 
 // Load graph data from backend
 async function loadGraphData() {
+    console.log('[DEBUG] loadGraphData() function entered');
     try {
         // show loader
         const loader = document.getElementById('mapLoader');
+        console.log('[DEBUG] Loader element:', loader);
         if (loader) loader.style.display = 'flex';
 
         // Load lightweight sampled graph first for fast rendering
-        console.log('Fetching /api/graph-data-lite');
+        console.log('[DEBUG] About to fetch /api/graph-data-lite');
         const response = await fetch('/api/graph-data-lite');
+        console.log('[DEBUG] Fetch response received:', response.status, response.ok);
         const data = await response.json();
-        console.log('/api/graph-data-lite returned', data && data.status);
+        console.log('[DEBUG] /api/graph-data-lite returned', data && data.status);
+        console.log('[DEBUG] Data keys:', data ? Object.keys(data) : 'null');
         
         if (data.status === 'success') {
             try {
@@ -714,6 +762,7 @@ function clearResults() {
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', function() {
+    console.log('[DEBUG] DOMContentLoaded event fired');
     // Initialize map
     initMap();
     
@@ -809,7 +858,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Departure time change - reload businesses if visible
-    const departureTimeInput = document.getElementById('departureTimeInput');
     if (departureTimeInput) {
         departureTimeInput.addEventListener('change', async function() {
             // Only reload if businesses are currently visible

@@ -13,6 +13,7 @@ import os
 import psutil
 import networkx as nx
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from route_visualizer import (
     geocode_address, snap_to_nearest_node, get_osrm_route, 
     snap_osrm_route_to_graph
@@ -49,50 +50,82 @@ def is_business_open_at_time(opening_hours, check_time):
     Returns:
         bool: True if open at check_time, False otherwise (or if hours unknown)
     """
-    if not opening_hours:
-        # No hours data available - assume open for backward compatibility
-        return True
-    
-    # Parse check_time if it's a string
-    if isinstance(check_time, str):
-        try:
-            check_time = datetime.fromisoformat(check_time.replace('Z', '+00:00'))
-        except:
-            print(f"Warning: Could not parse time '{check_time}'")
+    try:
+        if not opening_hours:
+            # No hours data available - assume open for backward compatibility
             return True
-    
-    # Get day of week (0=Monday in Python, but Google uses 0=Sunday)
-    check_day = (check_time.weekday() + 1) % 7  # Convert Python's Monday=0 to Google's Sunday=0
-    check_minutes = check_time.hour * 60 + check_time.minute
-    
-    # Check each period to see if we're in an open window
-    for period in opening_hours:
-        open_info = period.get("open", {})
-        close_info = period.get("close", {})
         
-        if not open_info or not close_info:
-            continue
+        # Ensure opening_hours is a list
+        if not isinstance(opening_hours, list):
+            return True
+        
+        # Parse check_time if it's a string
+        if isinstance(check_time, str):
+            try:
+                check_time = datetime.fromisoformat(check_time.replace('Z', '+00:00'))
+            except Exception as e:
+                print(f"Warning: Could not parse time '{check_time}': {e}")
+                return True
+        
+        # If check_time is not a datetime object at this point, assume open
+        if not isinstance(check_time, datetime):
+            return True
+        
+        # Convert UTC time to Eastern time (where the businesses are located)
+        # Google Places opening hours are in the business's local timezone
+        try:
+            eastern_tz = ZoneInfo("America/New_York")
+            if check_time.tzinfo is None:
+                # If naive datetime, assume it's already in local time
+                check_time_local = check_time
+            else:
+                # Convert from UTC to Eastern
+                check_time_local = check_time.astimezone(eastern_tz)
+        except Exception as e:
+            print(f"Warning: Timezone conversion failed: {e}")
+            check_time_local = check_time
+        
+        # Get day of week (0=Monday in Python, but Google uses 0=Sunday)
+        check_day = (check_time_local.weekday() + 1) % 7  # Convert Python's Monday=0 to Google's Sunday=0
+        check_minutes = check_time_local.hour * 60 + check_time_local.minute
+        
+        # Check each period to see if we're in an open window
+        for period in opening_hours:
+            if not isinstance(period, dict):
+                continue
+                
+            open_info = period.get("open", {})
+            close_info = period.get("close", {})
             
-        open_day = open_info.get("day", -1)
-        open_minutes = open_info.get("hour", 0) * 60 + open_info.get("minute", 0)
-        close_day = close_info.get("day", -1)
-        close_minutes = close_info.get("hour", 0) * 60 + close_info.get("minute", 0)
+            if not open_info or not close_info:
+                continue
+                
+            open_day = open_info.get("day", -1)
+            open_minutes = open_info.get("hour", 0) * 60 + open_info.get("minute", 0)
+            close_day = close_info.get("day", -1)
+            close_minutes = close_info.get("hour", 0) * 60 + close_info.get("minute", 0)
+            
+            # Handle same-day hours
+            if open_day == close_day == check_day:
+                if open_minutes <= check_minutes < close_minutes:
+                    return True
+            
+            # Handle hours that span midnight
+            elif open_day != close_day:
+                # Check if we're on the opening day after opening time
+                if check_day == open_day and check_minutes >= open_minutes:
+                    return True
+                # Check if we're on the closing day before closing time
+                elif check_day == close_day and check_minutes < close_minutes:
+                    return True
         
-        # Handle same-day hours
-        if open_day == close_day == check_day:
-            if open_minutes <= check_minutes < close_minutes:
-                return True
-        
-        # Handle hours that span midnight
-        elif open_day != close_day:
-            # Check if we're on the opening day after opening time
-            if check_day == open_day and check_minutes >= open_minutes:
-                return True
-            # Check if we're on the closing day before closing time
-            elif check_day == close_day and check_minutes < close_minutes:
-                return True
-    
-    return False
+        return False
+    except Exception as e:
+        print(f"Error in is_business_open_at_time: {e}")
+        import traceback
+        traceback.print_exc()
+        # On any error, assume open to avoid breaking the app
+        return True
 
 # --- Pre-built graph loading ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'

@@ -346,7 +346,7 @@ def _bbox_centroid(bbox):
     return ( (n + s) / 2.0, (e + w) / 2.0 )
 
 
-def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, max_reviews=999999):
+def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=50, max_reviews=999999):
     """Fetch businesses in bbox via Google Places API (New).
 
     Uses the new Places API v1 endpoint with searchNearby method.
@@ -395,24 +395,32 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
     }
     
     def _fetch_place_details(place_id):
-        """Fetch opening hours for a specific place."""
+        """Fetch opening hours and business status for a specific place."""
         try:
             details_url = f"https://places.googleapis.com/v1/places/{place_id}"
             details_headers = {
                 "X-Goog-Api-Key": api_key,
-                "X-Goog-FieldMask": "regularOpeningHours,currentOpeningHours"
+                "X-Goog-FieldMask": "regularOpeningHours,currentOpeningHours,businessStatus"
             }
             resp = requests.get(details_url, headers=details_headers, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
+                # Check business status
+                business_status = data.get("businessStatus", "OPERATIONAL")
+                
+                # Skip if temporarily or permanently closed
+                if business_status in ["CLOSED_TEMPORARILY", "CLOSED_PERMANENTLY"]:
+                    print(f"   DEBUG: Skipping closed business (status: {business_status})")
+                    return None, business_status
+                
                 # Try regularOpeningHours first, fall back to currentOpeningHours
                 opening_hours = data.get("regularOpeningHours", data.get("currentOpeningHours", {}))
                 periods = opening_hours.get("periods", [])
-                return periods
-            return []
+                return periods, business_status
+            return [], "OPERATIONAL"
         except Exception as e:
             print(f"   ERROR: Failed to fetch details for place {place_id}: {e}")
-            return []
+            return [], "OPERATIONAL"
 
     def _do_request(center_lat, center_lon, radius):
         try:
@@ -498,10 +506,6 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
     search_radius = FIXED_RADIUS
     
     for idx, (center_lat, center_lon) in enumerate(centers):
-        # Add small delay to avoid rate limiting (except for first request)
-        if idx > 0:
-            time.sleep(0.1)
-            
         try:
             data = _do_request(center_lat, center_lon, search_radius)
         except Exception as e:
@@ -554,9 +558,20 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=1, m
             if place_id in all_results:
                 continue
             
-            # Fetch opening hours from Place Details API (with rate limiting)
-            opening_hours = _fetch_place_details(place_id)
-            time.sleep(0.05)  # Small delay to avoid rate limiting Place Details API
+            # Fetch opening hours and business status from Place Details API
+            opening_hours, business_status = _fetch_place_details(place_id)
+            
+            # Skip if business is closed
+            if opening_hours is None:
+                filtered_by_review_count += 1  # Reuse counter for simplicity
+                print(f"   DEBUG: Skipping '{name}' - closed business")
+                continue
+            
+            # Skip if business has no hours posted
+            if not opening_hours or len(opening_hours) == 0:
+                filtered_by_review_count += 1
+                print(f"   DEBUG: Skipping '{name}' - no hours available")
+                continue
             
             all_results[place_id] = (lat, lon, name, primary_type, opening_hours, review_count, None)
 
