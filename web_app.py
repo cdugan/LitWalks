@@ -1081,21 +1081,27 @@ def api_routes():
             def fastest_weight(u, v, data_attr):
                 data = normalize_edge_data(data_attr)
                 
-                # ALWAYS recalculate weight - don't trust pre-built optimized_weight
-                # It may have been built with the old buggy formula
-                travel_time = data.get('travel_time', 1)
-                danger = data.get('danger_score', 50)
-                sidewalk_score = data.get('sidewalk_score', 0)
-                is_footpath = (sidewalk_score >= 0.99)
-                road_penalty = 1.0 if is_footpath else 10.0
-                safety_for_routing = 100.0 - danger
-                weight = travel_time * road_penalty / (safety_for_routing + 0.01)
+                # Check if optimized_weight exists, if not calculate it
+                if 'optimized_weight' not in data:
+                    # Calculate on the fly using the same formula as graph_builder
+                    travel_time = data.get('travel_time', 1)
+                    danger = data.get('danger_score', 50)
+                    sidewalk_score = data.get('sidewalk_score', 0)
+                    is_footpath = (sidewalk_score >= 0.99)
+                    road_penalty = 1.0 if is_footpath else 10.0
+                    safety_for_routing = 100.0 - danger
+                    weight = travel_time * road_penalty / (safety_for_routing + 0.01)
+                else:
+                    weight = data['optimized_weight']
                 
                 # Debug log first few edges
                 if len(debug_weights) < 10:
                     highway = data.get('highway', 'unknown')
-                    old_opt = data.get('optimized_weight', 'N/A')
-                    debug_weights.append(f"  Edge {u}->{v}: hw={highway}, footpath={is_footpath}, sidewalk={sidewalk_score:.1f}, danger={danger:.1f}, NEW_weight={weight:.2f}, OLD_opt={old_opt}")
+                    danger = data.get('danger_score', 0)
+                    is_footpath = data.get('is_footpath', False)
+                    sidewalk = data.get('sidewalk_score', 0)
+                    has_opt = 'optimized_weight' in data
+                    debug_weights.append(f"  Edge {u}->{v}: hw={highway}, footpath={is_footpath}, sidewalk={sidewalk:.1f}, danger={danger:.1f}, opt_weight={weight:.2f}, had_opt={has_opt}")
                 
                 return weight
             
@@ -1109,11 +1115,10 @@ def api_routes():
                 is_footpath = (sidewalk_score >= 0.99)
                 road_penalty = 1.0 if is_footpath else 10.0
                 
-                # For safest route, HEAVILY penalize danger
-                # Weight = (length * road_penalty * danger) / 100
-                # This makes danger a direct cost multiplier, not just dividing by safety
-                # Danger ranges 0-100, so weight scales appropriately
-                return (length * road_penalty * (danger + 1)) / 100.0
+                # Weight = danger * length * road_penalty
+                # Lower danger = lower weight = preferred
+                # Footpaths get 1x, roads get 10x multiplier
+                return danger * length * road_penalty
             
             # Compute fastest route
             print("  Computing fastest route (pure time)...")

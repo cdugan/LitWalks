@@ -13,6 +13,28 @@ let boundaryBox; // boundary rectangle layer
 let mapClickMode = null; // 'start' or 'end' for map picking mode
 const BBOX = window.APP_BBOX || [35.42, 35.28, -82.40, -82.55]; // [north, south, east, west] - fallback to Hendersonville if not set
 
+// Zoom level thresholds for detail layers
+const ZOOM_THRESHOLD_GRAPH = 14;   // Show road highlights at zoom 14+
+const ZOOM_THRESHOLD_DETAILS = 15;  // Show streetlights and businesses at zoom 15+
+let zoomNoticeControl; // Leaflet control for zoom notices
+
+// Function to calculate road styling based on zoom level
+function getRoadStyle(zoom) {
+    // Progressive weight and opacity based on zoom
+    // Zoom 14: thin and transparent (less busy)
+    // Zoom 15-16: medium weight and opacity
+    // Zoom 17+: full weight and opacity (detailed view)
+    if (zoom < 15) {
+        return { weight: 1.5, opacity: 0.4 };
+    } else if (zoom < 16) {
+        return { weight: 2.0, opacity: 0.55 };
+    } else if (zoom < 17) {
+        return { weight: 2.5, opacity: 0.7 };
+    } else {
+        return { weight: 3.0, opacity: 0.85 };
+    }
+}
+
 // Check if coordinates are within bounds
 function isWithinBounds(lat, lon) {
     const [north, south, east, west] = BBOX;
@@ -67,9 +89,123 @@ function initMap() {
         }
     });
     
+    // Set up zoom event listeners for detail layer visibility and styling
+    map.on('zoom', function() {
+        updateDetailLayerVisibility();
+        updateRoadStyling();
+    });
+
+    // Add zoom notice control (bottom-left)
+    zoomNoticeControl = L.control({ position: 'bottomleft' });
+    zoomNoticeControl.onAdd = function() {
+        const div = L.DomUtil.create('div', 'zoom-notice');
+        div.style.padding = '6px 10px';
+        div.style.background = 'rgba(255,255,255,0.9)';
+        div.style.border = '1px solid #ccc';
+        div.style.borderRadius = '6px';
+        div.style.boxShadow = '0 1px 4px rgba(0,0,0,0.2)';
+        div.style.fontSize = '13px';
+        div.style.color = '#333';
+        div.style.display = 'none';
+        this._div = div;
+        return div;
+    };
+    zoomNoticeControl.addTo(map);
+    
     // Load initial graph data
     console.log('[DEBUG] Calling loadGraphData()');
     loadGraphData();
+}
+
+// Update visibility of detail layers based on zoom level
+function updateDetailLayerVisibility() {
+    const currentZoom = map.getZoom();
+    const graphToggle = document.getElementById('roadSafetyToggle') || document.getElementById('graphToggle');
+    const lightsToggle = document.getElementById('streetlightsToggle');
+    const bizToggle = document.getElementById('businessesToggle');
+    const graphEnabled = !graphToggle || graphToggle.checked;
+    const lightsEnabled = !lightsToggle || lightsToggle.checked;
+    const bizEnabled = !bizToggle || bizToggle.checked;
+    const notices = [];
+    
+    // Road safety highlights (graph layer)
+    if (graphLayer) {
+        if (graphEnabled && currentZoom >= ZOOM_THRESHOLD_GRAPH) {
+            if (!map.hasLayer(graphLayer)) {
+                map.addLayer(graphLayer);
+            }
+        } else {
+            if (map.hasLayer(graphLayer)) {
+                map.removeLayer(graphLayer);
+            }
+            if (graphEnabled) {
+                notices.push(`road safety colors (≥${ZOOM_THRESHOLD_GRAPH})`);
+            }
+        }
+    }
+    
+    // Streetlights layer
+    if (lightsLayer) {
+        if (lightsEnabled && currentZoom >= ZOOM_THRESHOLD_DETAILS) {
+            if (!map.hasLayer(lightsLayer)) {
+                map.addLayer(lightsLayer);
+            }
+        } else {
+            if (map.hasLayer(lightsLayer)) {
+                map.removeLayer(lightsLayer);
+            }
+            if (lightsEnabled) {
+                notices.push(`streetlights (≥${ZOOM_THRESHOLD_DETAILS})`);
+            }
+        }
+    }
+    
+    // Businesses layer
+    if (businessesLayer) {
+        if (bizEnabled && currentZoom >= ZOOM_THRESHOLD_DETAILS) {
+            if (!map.hasLayer(businessesLayer)) {
+                map.addLayer(businessesLayer);
+            }
+        } else {
+            if (map.hasLayer(businessesLayer)) {
+                map.removeLayer(businessesLayer);
+            }
+            if (bizEnabled) {
+                notices.push(`businesses (≥${ZOOM_THRESHOLD_DETAILS})`);
+            }
+        }
+    }
+
+    // Update zoom notice display
+    if (zoomNoticeControl && zoomNoticeControl._div) {
+        if (notices.length === 0) {
+            zoomNoticeControl._div.style.display = 'none';
+            zoomNoticeControl._div.innerHTML = '';
+        } else {
+            zoomNoticeControl._div.style.display = 'block';
+            zoomNoticeControl._div.innerHTML = `Zoom in to see: ${notices.join(', ')}`;
+        }
+    }
+}
+
+// Update road styling based on current zoom level
+function updateRoadStyling() {
+    if (!graphLayer) return;
+    
+    const currentZoom = map.getZoom();
+    const style = getRoadStyle(currentZoom);
+    
+    // Update all road layers with new styling
+    graphLayer.eachLayer(function(layer) {
+        if (layer.setStyle) {
+            const currentStyle = layer.options;
+            layer.setStyle({
+                weight: style.weight,
+                opacity: style.opacity
+                // Keep existing color
+            });
+        }
+    });
 }
 
 // Format opening hours periods into readable text
@@ -147,8 +283,10 @@ async function loadBusinesses() {
                 marker.bindPopup(popup);
                 return marker;
             });
-            businessesLayer = L.featureGroup(businessMarkers).addTo(map);
-            console.log('Added', data.length, 'open businesses');
+            businessesLayer = L.featureGroup(businessMarkers);
+            // Don't add to map yet; let updateDetailLayerVisibility handle it
+            console.log('Loaded', data.length, 'open businesses (hidden until zoom 15+)');
+            updateDetailLayerVisibility();
         }
     } catch (error) {
         console.error('Error loading businesses:', error);
@@ -181,14 +319,15 @@ async function loadGraphData() {
                 
                 // Add graph edges as GeoJSON
                 console.log('Creating L.geoJSON with', data.edges.features ? data.edges.features.length + ' features' : 'data.edges');
+                const currentStyle = getRoadStyle(map.getZoom());
                 graphLayer = L.geoJSON(data.edges, {
                     style: function(feature) {
                         const safetyScore = feature.properties.safety_score || 100;
                         const color = getSafetyColor(safetyScore);
                         return {
                             color: color,
-                            weight: 2.5,
-                            opacity: 0.8
+                            weight: currentStyle.weight,
+                            opacity: currentStyle.opacity
                         };
                     },
                     onEachFeature: function(feature, layer) {
@@ -221,7 +360,9 @@ async function loadGraphData() {
                         layer.bindPopup(popup);
                     }
                 }).addTo(map);
-                console.log('Lite graph layer added to map');
+                console.log('Graph layer loaded (hidden until zoom 14+)');
+                // Don't add to map yet; let updateDetailLayerVisibility handle it
+                map.removeLayer(graphLayer);
             } catch (layerErr) {
                 console.error('Error creating lite graph layer:', layerErr);
                 throw layerErr;
@@ -244,12 +385,16 @@ async function loadGraphData() {
                             fillOpacity: 0.6
                         })
                     );
-                    lightsLayer = L.featureGroup(lightMarkers).addTo(map);
-                    console.log('Added', data.lights.length, 'streetlights');
+                    lightsLayer = L.featureGroup(lightMarkers);
+                    // Don't add to map yet; let updateDetailLayerVisibility handle it
+                    console.log('Loaded', data.lights.length, 'streetlights (hidden until zoom 15+)');
                 }
             } catch (lightsErr) {
                 console.error('Error adding lights:', lightsErr);
             }
+            
+            // Set up initial detail layer visibility based on current zoom
+            updateDetailLayerVisibility();
             
             // Add businesses on initial load (if checkbox is checked)
             try {
@@ -291,11 +436,12 @@ async function loadFullGraph() {
         if (full && full.status === 'success') {
             // Replace graphLayer with full geometry
             if (graphLayer) map.removeLayer(graphLayer);
+            const currentStyle = getRoadStyle(map.getZoom());
             graphLayer = L.geoJSON(full.edges, {
                 style: function(feature) {
                     const dangerScore = feature.properties.danger_score || 0;
                     const color = getDangerColor(dangerScore);
-                    return { color: color, weight: 2.5, opacity: 0.85 };
+                    return { color: color, weight: currentStyle.weight, opacity: currentStyle.opacity };
                 },
                 onEachFeature: function(feature, layer) {
                     const props = feature.properties;
@@ -334,6 +480,8 @@ async function loadFullGraph() {
                     layer.bindPopup(popup);
                 }
             }).addTo(map);
+            // Apply zoom-based visibility right after loading full graph
+            updateDetailLayerVisibility();
             
             // Hide loader when full graph arrives
             const loader = document.getElementById('mapLoader');
@@ -791,30 +939,17 @@ document.addEventListener('DOMContentLoaded', function() {
     const graphToggle = document.getElementById('roadSafetyToggle') || document.getElementById('graphToggle');
     if (graphToggle) {
         graphToggle.addEventListener('change', function() {
-            if (this.checked) {
-                if (graphLayer) {
-                    map.addLayer(graphLayer);
-                }
-            } else {
-                if (graphLayer) {
-                    map.removeLayer(graphLayer);
-                }
-            }
+            updateDetailLayerVisibility();
         });
     }
     
     // Streetlights toggle
-    document.getElementById('streetlightsToggle').addEventListener('change', function() {
-        if (this.checked) {
-            if (lightsLayer) {
-                map.addLayer(lightsLayer);
-            }
-        } else {
-            if (lightsLayer) {
-                map.removeLayer(lightsLayer);
-            }
-        }
-    });
+    const lightsToggle = document.getElementById('streetlightsToggle');
+    if (lightsToggle) {
+        lightsToggle.addEventListener('change', function() {
+            updateDetailLayerVisibility();
+        });
+    }
     
     // Clear button
     document.getElementById('clearBtn').addEventListener('click', clearResults);
@@ -870,12 +1005,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (!businessesLayer) {
                     await loadBusinesses();
                 }
+                updateDetailLayerVisibility();
             } else {
                 // Remove business layer
                 if (businessesLayer) {
                     map.removeLayer(businessesLayer);
                     businessesLayer = null;
                 }
+                updateDetailLayerVisibility();
             }
         });
     }
