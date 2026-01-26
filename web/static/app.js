@@ -14,25 +14,15 @@ let mapClickMode = null; // 'start' or 'end' for map picking mode
 const BBOX = window.APP_BBOX || [35.42, 35.28, -82.40, -82.55]; // [north, south, east, west] - fallback to Hendersonville if not set
 
 // Zoom level thresholds for detail layers
-const ZOOM_THRESHOLD_GRAPH = 14;   // Show road highlights at zoom 14+
-const ZOOM_THRESHOLD_DETAILS = 15;  // Show streetlights and businesses at zoom 15+
+const ZOOM_THRESHOLD_GRAPH = 17;   // Show road highlights at zoom 17+
+const ZOOM_THRESHOLD_DETAILS = 16;  // Show streetlights and businesses at zoom 16+
 let zoomNoticeControl; // Leaflet control for zoom notices
 
 // Function to calculate road styling based on zoom level
 function getRoadStyle(zoom) {
-    // Progressive weight and opacity based on zoom
-    // Zoom 14: thin and transparent (less busy)
-    // Zoom 15-16: medium weight and opacity
-    // Zoom 17+: full weight and opacity (detailed view)
-    if (zoom < 15) {
-        return { weight: 1.5, opacity: 0.4 };
-    } else if (zoom < 16) {
-        return { weight: 2.0, opacity: 0.55 };
-    } else if (zoom < 17) {
-        return { weight: 2.5, opacity: 0.7 };
-    } else {
-        return { weight: 3.0, opacity: 0.85 };
-    }
+    // Previously had Progressive weight and opacity based on zoom, now just always slightly transparent and medium weight
+    return { weight: 1.5, opacity: 0.4 };
+
 }
 
 // Check if coordinates are within bounds
