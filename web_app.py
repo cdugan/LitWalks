@@ -14,11 +14,19 @@ import psutil
 import numpy as np
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from route_visualizer import (
-    geocode_address, snap_to_nearest_node, get_osrm_route, 
-    snap_osrm_route_to_graph
-)
 from compact_graph import build_compact_graph
+
+try:
+    from geopy.geocoders import Nominatim
+    HAS_GEOPY = True
+except Exception:
+    HAS_GEOPY = False
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except Exception:
+    HAS_REQUESTS = False
 
 # BBOX for default area
 # BBOX for default area (centralized in config)
@@ -129,6 +137,70 @@ def is_business_open_at_time(opening_hours, check_time):
         return True
 
 # --- Business Score Recalculation ---
+
+def geocode_address(address):
+    """Convert an address string to (lat, lon) coordinates using Nominatim."""
+    if not HAS_GEOPY:
+        raise ImportError("geopy is required for address geocoding. Install with: pip install geopy")
+
+    geolocator = Nominatim(user_agent="litwalks_web")
+    address_variants = [
+        address,
+        address.split(',')[0] + ',' + ','.join(address.split(',')[1:]),
+    ]
+
+    if ',' in address:
+        parts = [p.strip() for p in address.split(',')]
+        if len(parts) > 1 and any(c.isdigit() for c in parts[-1]):
+            address_variants.append(', '.join(parts[:-1]))
+        if len(parts) >= 2:
+            address_variants.append(f"{parts[0]}, {parts[-2]}")
+        if len(parts) >= 2:
+            address_variants.append(', '.join(parts[-2:]))
+
+    for variant in address_variants:
+        try:
+            location = geolocator.geocode(variant, timeout=10)
+            if location:
+                print(f"  ✓ '{address}' -> ({location.latitude}, {location.longitude})")
+                return location.latitude, location.longitude
+        except Exception:
+            continue
+
+    raise ValueError(
+        f"Could not geocode address: '{address}'. "
+        f"Try 'Street, City, State' or use coordinates directly."
+    )
+
+
+def get_osrm_route(lat1, lon1, lat2, lon2):
+    """Get route from OSRM API (public server)."""
+    if not HAS_REQUESTS:
+        return None
+    try:
+        url = f"https://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?geometries=geojson"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('code') == 'Ok' and data.get('routes'):
+            coords = data['routes'][0]['geometry']['coordinates']
+            route = [(lat, lon) for lon, lat in coords]
+            distance = data['routes'][0]['distance']
+            duration = data['routes'][0]['duration']
+            return route, distance, duration
+        print(f"  ⚠️ OSRM error: {data.get('message', 'Unknown error')}")
+        return None
+    except Exception as e:
+        print(f"  ⚠️ OSRM API error: {e}")
+        return None
+
+
+def snap_to_nearest_node(compact_graph, lat, lon):
+    """Find nearest node in compact graph to (lat, lon)."""
+    dx = compact_graph.node_x - float(lon)
+    dy = compact_graph.node_y - float(lat)
+    idx = int(np.argmin(dx * dx + dy * dy))
+    return compact_graph.node_ids[idx]
 
 def _recalculate_business_scores(G, businesses, departure_time):
     """Recalculate business proximity scores based on open businesses at departure_time.
@@ -260,11 +332,92 @@ def _recalculate_business_scores(G, businesses, departure_time):
     
     return G
 
+
+def _recalculate_business_scores_compact(compact, businesses, departure_time):
+    """Recalculate business proximity scores on compact graph in-place."""
+    from math import radians, cos, sin, asin, sqrt
+
+    W_DARKNESS = 40.0
+    W_SIDEWALK = 30.0
+    W_BUSINESS = 15.0
+    W_LAND = 10.0
+    W_SPEED = 5.0
+    PROXIMITY_THRESHOLD_KM = 0.1
+
+    def haversine_km(lat1, lon1, lat2, lon2):
+        lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        return c * 6371
+
+    open_businesses = []
+    for biz in businesses:
+        if len(biz) >= 7:
+            lat, lon, name, btype, hours, review_count, is_open = biz[:7]
+            if is_business_open_at_time(hours, departure_time):
+                open_businesses.append((lat, lon, name))
+
+    print(f"  Open businesses at {departure_time}: {len(open_businesses)}/{len(businesses)}")
+
+    edge_count = len(compact.edge_u_idx)
+    for i in range(edge_count):
+        u_idx = int(compact.edge_u_idx[i])
+        v_idx = int(compact.edge_v_idx[i])
+
+        edge_lat = (float(compact.node_y[u_idx]) + float(compact.node_y[v_idx])) / 2.0
+        edge_lon = (float(compact.node_x[u_idx]) + float(compact.node_x[v_idx])) / 2.0
+
+        nearby_count = 0
+        for biz_lat, biz_lon, _ in open_businesses:
+            dist = haversine_km(edge_lat, edge_lon, biz_lat, biz_lon)
+            if dist <= PROXIMITY_THRESHOLD_KM:
+                nearby_count += 1
+
+        business_score = 0.9 if nearby_count > 0 else 0.3
+
+        darkness_score = float(compact.edge_darkness_score[i]) if compact.edge_darkness_score.size else 0.5
+        sidewalk_score = float(compact.edge_sidewalk[i]) if compact.edge_sidewalk.size else 0.5
+        land_risk = float(compact.edge_land_risk[i]) if compact.edge_land_risk.size else 0.5
+        speed_risk = float(compact.edge_speed_risk[i]) if compact.edge_speed_risk.size else 0.5
+        travel_time = float(compact.edge_travel_time[i]) if compact.edge_travel_time.size else 1.0
+        length = float(compact.edge_length[i]) if compact.edge_length.size else 1.0
+
+        danger = (
+            W_DARKNESS * darkness_score +
+            W_SIDEWALK * (1.0 - sidewalk_score) +
+            W_BUSINESS * (1.0 - business_score) +
+            W_LAND * land_risk +
+            W_SPEED * speed_risk
+        )
+
+        is_footpath = bool(compact.edge_is_footpath[i]) if compact.edge_is_footpath.size else False
+        road_penalty = 1.0 if is_footpath else 10.0
+        safety_for_routing = 100.0 - danger
+        optimized_weight = travel_time * road_penalty / (safety_for_routing + 0.01)
+        safest_weight = danger * length * road_penalty
+
+        if compact.edge_business_score.size:
+            compact.edge_business_score[i] = business_score
+        if compact.edge_business_count.size:
+            compact.edge_business_count[i] = nearby_count
+        if compact.edge_danger.size:
+            compact.edge_danger[i] = danger
+        if compact.edge_optimized_weight.size:
+            compact.edge_optimized_weight[i] = optimized_weight
+        if compact.weights_fastest.size:
+            compact.weights_fastest[i] = optimized_weight
+        if compact.weights_safest.size:
+            compact.weights_safest[i] = safest_weight
+
+    return compact
+
 # --- Pre-built graph loading (lazy + compressed) ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
 _GRAPH_PREBUILT_FILE_GZ = 'graph_prebuilt.pkl.gz'
-_graph_cache = {}
 _compact_graph_cache = {}
+_lights_cache = {}
 _businesses_cache = None
 _GRAPH_LOADED = False
 _GRAPH_LOAD_ERROR = None
@@ -308,7 +461,7 @@ def _load_prebuilt_graph():
             _businesses_cache = []
         
         elapsed = time.time() - start
-        _graph_cache[str(BBOX)] = (G, lights)
+        _lights_cache[str(BBOX)] = lights
         try:
             compact_start = time.time()
             compact = build_compact_graph(G)
@@ -318,9 +471,17 @@ def _load_prebuilt_graph():
         except Exception as cg_err:
             print(f"[graph] WARNING: failed to build compact graph: {cg_err}")
         _GRAPH_LOADED = True
+
+        # Release NetworkX graph to reduce memory footprint
+        try:
+            del G
+        except Exception:
+            pass
         
         file_size = os.path.getsize(graph_file) / (1024 * 1024)
-        print(f"[graph] Graph loaded in {elapsed:.3f}s ({file_size:.1f}MB) — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0} businesses={len(_businesses_cache) if _businesses_cache else 0}")
+        node_count = len(compact.node_ids) if str(BBOX) in _compact_graph_cache else 0
+        edge_count = len(compact.indices) if str(BBOX) in _compact_graph_cache else 0
+        print(f"[graph] Graph loaded in {elapsed:.3f}s ({file_size:.1f}MB) — nodes={node_count} edges={edge_count} lights={len(lights) if lights else 0} businesses={len(_businesses_cache) if _businesses_cache else 0}")
         return True
     except Exception as e:
         _GRAPH_LOAD_ERROR = str(e)
@@ -335,17 +496,10 @@ _geojson_cache = {}  # Keys: 'graph-data', 'graph-data-lite'; Values: (geojson_d
 
 
 def _get_graph():
-    """Return the pre-loaded graph and lights; load on-demand if needed."""
-    if not _GRAPH_LOADED:
-        print("[graph] Lazy loading graph on first request...")
-        success = _load_prebuilt_graph()
-        if not success:
-            raise RuntimeError(f"Graph failed to load: {_GRAPH_LOAD_ERROR}")
-    
-    bbox_key = str(BBOX)
-    if bbox_key in _graph_cache:
-        return _graph_cache[bbox_key]
-    raise RuntimeError("Graph cache miss despite successful load (should not happen)")
+    """Return the compact graph and lights; load on-demand if needed."""
+    compact = _get_compact_graph()
+    lights = _get_lights()
+    return compact, lights
 
 
 def _get_compact_graph():
@@ -358,13 +512,21 @@ def _get_compact_graph():
     bbox_key = str(BBOX)
     if bbox_key in _compact_graph_cache:
         return _compact_graph_cache[bbox_key]
-    # Fallback: build compact graph from cached NetworkX graph
-    if bbox_key in _graph_cache:
-        G, _ = _graph_cache[bbox_key]
-        compact = build_compact_graph(G)
-        _compact_graph_cache[bbox_key] = compact
-        return compact
+    # Fallback not possible without NetworkX graph cached
     raise RuntimeError("Compact graph cache miss despite successful load (should not happen)")
+
+
+def _get_lights():
+    """Return cached lights list; load on-demand if needed."""
+    if not _GRAPH_LOADED:
+        print("[graph] Lazy loading graph on first request...")
+        success = _load_prebuilt_graph()
+        if not success:
+            raise RuntimeError(f"Graph failed to load: {_GRAPH_LOAD_ERROR}")
+    bbox_key = str(BBOX)
+    if bbox_key in _lights_cache:
+        return _lights_cache[bbox_key]
+    return []
 
 
 def get_memory_usage():
@@ -402,8 +564,8 @@ def _build_full_geojson_cache():
     """Build and cache the full graph GeoJSON (deterministic)."""
     if 'graph-data' in _geojson_cache:
         return
-    G, lights = _get_graph()
-    edges_fc = graph_to_geojson(G)
+    compact, lights = _get_graph()
+    edges_fc = graph_to_geojson(compact)
     lights_list = [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []
     response = {
         "bbox": list(BBOX),
@@ -422,39 +584,42 @@ def _build_lite_geojson_cache():
     """Build and cache the sampled graph GeoJSON (deterministic)."""
     if 'graph-data-lite' in _geojson_cache:
         return
-    G, lights = _get_graph()
-    total_edges = len(list(G.edges(keys=True)))
+    compact, lights = _get_graph()
+    total_edges = len(compact.edge_u_idx)
     sample_interval = max(1, total_edges // 1000)
     features = []
     i = 0
-    for u, v, k, data in G.edges(keys=True, data=True):
+    for edge_idx in range(total_edges):
         if (i % sample_interval) != 0:
             i += 1
             continue
-        geom = data.get('geometry')
-        if geom is not None:
-            try:
-                coords = [[round(float(x), 5), round(float(y), 5)] for x, y in geom.coords]
-            except Exception:
-                coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+        start = int(compact.edge_geom_indptr[edge_idx])
+        end = int(compact.edge_geom_indptr[edge_idx + 1])
+        if end > start:
+            coords = [[round(float(x), 5), round(float(y), 5)] for x, y in zip(compact.edge_geom_x[start:end], compact.edge_geom_y[start:end])]
         else:
-            coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+            u_idx = int(compact.edge_u_idx[edge_idx])
+            v_idx = int(compact.edge_v_idx[edge_idx])
+            coords = [
+                [round(float(compact.node_x[u_idx]), 5), round(float(compact.node_y[u_idx]), 5)],
+                [round(float(compact.node_x[v_idx]), 5), round(float(compact.node_y[v_idx]), 5)]
+            ]
 
-        length_val = data.get('length', 0)
-        safety_val = data.get('safety_score', 100)
+        length_val = float(compact.edge_length[edge_idx])
+        safety_val = 100.0 - float(compact.edge_danger[edge_idx])
 
         features.append({
             'type': 'Feature',
             'geometry': {'type': 'LineString', 'coordinates': coords},
             'properties': {
                 'safety_score': safety_val,
-                'light_count': data.get('light_count', 0),
-                'curve_score': data.get('curve_score', 0),
-                'darkness_score': data.get('darkness_score', 0),
-                'highway_risk': data.get('highway_risk', 1),
-                'highway_tag': data.get('highway_tag', None),
-                'land_risk': data.get('land_risk', 0.6),
-                'land_label': data.get('land_label', 'Unknown')
+                'light_count': int(compact.edge_light_count[edge_idx]) if compact.edge_light_count.size else 0,
+                'curve_score': 0,
+                'darkness_score': float(compact.edge_darkness_score[edge_idx]) if compact.edge_darkness_score.size else 0.0,
+                'highway_risk': 1,
+                'highway_tag': None,
+                'land_risk': float(compact.edge_land_risk[edge_idx]) if compact.edge_land_risk.size else 0.6,
+                'land_label': 'Unknown'
             }
         })
         i += 1
@@ -476,17 +641,21 @@ def _warm_geojson_caches():
 def _warm_route_computation():
     """Prime a tiny route computation so first user request is fast."""
     try:
-        G, _ = _get_graph()
         compact = _get_compact_graph()
         try:
-            u, v = next(iter(G.edges()))
+            if len(compact.edge_u_idx) == 0:
+                raise StopIteration
+            u_idx = int(compact.edge_u_idx[0])
+            v_idx = int(compact.edge_v_idx[0])
+            u = compact.node_ids[u_idx]
+            v = compact.node_ids[v_idx]
         except StopIteration:
             print("[startup] Route warm-up skipped: graph has no edges")
             return
 
         # Run a lightweight nearest-node lookup to warm osmnx/shapely
         try:
-            snap_to_nearest_node(G, G.nodes[u]['y'], G.nodes[u]['x'])
+            snap_to_nearest_node(compact, compact.node_y[u_idx], compact.node_x[u_idx])
         except Exception as warm_err:
             print(f"[startup] Route warm-up nearest-node skipped: {warm_err}")
 
@@ -494,8 +663,7 @@ def _warm_route_computation():
         try:
             path, edge_indices = compact.shortest_path(u, v, weight="fastest")
             if path and edge_indices:
-                edge_keys = compact.edge_keys_for_path(edge_indices)
-                route_to_geojson(path, G, "warm", edge_keys=edge_keys)
+                route_to_geojson(path, compact, "warm", edge_indices=edge_indices)
                 print(f"[startup] Route warm-up complete: {len(path)} nodes")
             else:
                 print("[startup] Route warm-up skipped: no path")
@@ -505,31 +673,27 @@ def _warm_route_computation():
         print(f"[startup] Route warm-up failed: {e}")
 
 
-def graph_to_geojson(G):
-    """Convert NetworkX graph to GeoJSON for map visualization."""
+def graph_to_geojson(compact):
+    """Convert compact graph to GeoJSON for map visualization."""
     features = []
-    
-    # Add edges as LineString features
-    for u, v, k, data in G.edges(keys=True, data=True):
-        try:
-            # Prefer edge geometry when available so roads follow curves
-            geom = data.get('geometry')
-            if geom is not None:
-                try:
-                    coords = [[float(x), float(y)] for x, y in geom.coords]
-                except Exception:
-                    # Some geometries may be MultiLineString; fallback to node endpoints
-                    u_lat, u_lon = G.nodes[u]['y'], G.nodes[u]['x']
-                    v_lat, v_lon = G.nodes[v]['y'], G.nodes[v]['x']
-                    coords = [[u_lon, u_lat], [v_lon, v_lat]]
-            else:
-                u_lat, u_lon = G.nodes[u]['y'], G.nodes[u]['x']
-                v_lat, v_lon = G.nodes[v]['y'], G.nodes[v]['x']
-                coords = [[u_lon, u_lat], [v_lon, v_lat]]
+    edge_count = len(compact.edge_u_idx)
 
-            length_val = data.get('length', 0)
-            # Use danger_score (higher = more dangerous), fallback to inverted safety_score for old graphs
-            danger_val = data.get('danger_score', 100 - data.get('safety_score', 0))
+    for i in range(edge_count):
+        try:
+            start = int(compact.edge_geom_indptr[i])
+            end = int(compact.edge_geom_indptr[i + 1])
+            if end > start:
+                coords = [[float(x), float(y)] for x, y in zip(compact.edge_geom_x[start:end], compact.edge_geom_y[start:end])]
+            else:
+                u_idx = int(compact.edge_u_idx[i])
+                v_idx = int(compact.edge_v_idx[i])
+                coords = [
+                    [float(compact.node_x[u_idx]), float(compact.node_y[u_idx])],
+                    [float(compact.node_x[v_idx]), float(compact.node_y[v_idx])]
+                ]
+
+            length_val = float(compact.edge_length[i])
+            danger_val = float(compact.edge_danger[i])
 
             features.append({
                 "type": "Feature",
@@ -539,35 +703,35 @@ def graph_to_geojson(G):
                 },
                 "properties": {
                     "danger_score": danger_val,
-                    "light_count": data.get('light_count', 0),
-                    "darkness_score": data.get('darkness_score', 0),
-                    "sidewalk_score": data.get('sidewalk_score', 0),
-                    "business_score": data.get('business_score', 0.5),
-                    "business_count": data.get('business_count', 0),
-                    "business_name": data.get('business_name', None),
-                    "business_hours": data.get('business_hours', []),
-                    "is_footpath": data.get('is_footpath', False),
-                    "highway": data.get('highway', 'unknown'),
-                    "land_risk": data.get('land_risk', 0.6),
-                    "land_label": data.get('land_label', 'Unknown'),
-                    "speed_risk": data.get('speed_risk', 0.0),
-                    "travel_time": data.get('travel_time', 0),
+                    "light_count": int(compact.edge_light_count[i]) if compact.edge_light_count.size else 0,
+                    "darkness_score": float(compact.edge_darkness_score[i]) if compact.edge_darkness_score.size else 0.0,
+                    "sidewalk_score": float(compact.edge_sidewalk[i]) if compact.edge_sidewalk.size else 0.0,
+                    "business_score": float(compact.edge_business_score[i]) if compact.edge_business_score.size else 0.5,
+                    "business_count": int(compact.edge_business_count[i]) if compact.edge_business_count.size else 0,
+                    "business_name": None,
+                    "business_hours": [],
+                    "is_footpath": bool(compact.edge_is_footpath[i]) if compact.edge_is_footpath.size else False,
+                    "highway": "unknown",
+                    "land_risk": float(compact.edge_land_risk[i]) if compact.edge_land_risk.size else 0.6,
+                    "land_label": "Unknown",
+                    "speed_risk": float(compact.edge_speed_risk[i]) if compact.edge_speed_risk.size else 0.0,
+                    "travel_time": float(compact.edge_travel_time[i]) if compact.edge_travel_time.size else 0.0,
                     "length": length_val,
-                    "speed_kph": data.get('speed_kph', 5),
-                    "name": data.get('name', 'Unknown')
+                    "speed_kph": float(compact.edge_speed_kph[i]) if compact.edge_speed_kph.size else 5.0,
+                    "name": "Unknown"
                 }
             })
         except Exception as e:
-            print(f"Error processing edge {u}-{v}: {e}")
+            print(f"Error processing edge #{i}: {e}")
             continue
-    
+
     return {
         "type": "FeatureCollection",
         "features": features
     }
 
 
-def route_to_geojson(route_nodes, G, route_type="fastest", edge_keys=None):
+def route_to_geojson(route_nodes, compact, route_type="fastest", edge_indices=None):
     """Convert a route (list of node IDs) to GeoJSON."""
     if not route_nodes or len(route_nodes) < 2:
         return None
@@ -581,31 +745,42 @@ def route_to_geojson(route_nodes, G, route_type="fastest", edge_keys=None):
     }
     
     try:
-        # Build route coordinates by concatenating edge geometries when available
-        if edge_keys is None:
-            edge_keys = [(route_nodes[i], route_nodes[i + 1], 0) for i in range(len(route_nodes) - 1)]
+        if edge_indices is None:
+            edge_indices = list(range(len(route_nodes) - 1))
 
-        for u, v, k in edge_keys:
-            edge_data = G.edges[u, v, k]
-            properties["length"] += edge_data.get('length', 0)
-            properties["travel_time"] += edge_data.get('travel_time', 0)
-            properties["safety_score"] += edge_data.get('safety_score', 100)
+        for i in range(len(route_nodes) - 1):
+            u_id = route_nodes[i]
+            v_id = route_nodes[i + 1]
+            u_idx = compact.node_id_to_idx.get(u_id)
+            v_idx = compact.node_id_to_idx.get(v_id)
+            if u_idx is None or v_idx is None:
+                continue
 
-            geom = edge_data.get('geometry')
-            if geom is not None:
-                try:
-                    pts = [[float(x), float(y)] for x, y in geom.coords]
-                except Exception:
-                    # fallback to node coordinates
-                    pts = [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+            edge_idx = edge_indices[i] if i < len(edge_indices) else None
+            if edge_idx is not None:
+                properties["length"] += float(compact.edge_length[edge_idx])
+                properties["travel_time"] += float(compact.edge_travel_time[edge_idx])
+                safety = 100.0 - float(compact.edge_danger[edge_idx])
+                properties["safety_score"] += safety
+
+                start = int(compact.edge_geom_indptr[edge_idx])
+                end = int(compact.edge_geom_indptr[edge_idx + 1])
+                if end > start:
+                    pts = [[float(x), float(y)] for x, y in zip(compact.edge_geom_x[start:end], compact.edge_geom_y[start:end])]
+                else:
+                    pts = [
+                        [float(compact.node_x[u_idx]), float(compact.node_y[u_idx])],
+                        [float(compact.node_x[v_idx]), float(compact.node_y[v_idx])]
+                    ]
             else:
-                pts = [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+                pts = [
+                    [float(compact.node_x[u_idx]), float(compact.node_y[u_idx])],
+                    [float(compact.node_x[v_idx]), float(compact.node_y[v_idx])]
+                ]
 
-            # Append points, avoiding duplicates
             if not coords:
                 coords.extend(pts)
             else:
-                # If last coord equals first of pts, skip it
                 if coords[-1] == pts[0]:
                     coords.extend(pts[1:])
                 else:
@@ -661,14 +836,14 @@ def api_graph_data():
         else:
             print('[api] /api/graph-data request received (building cache)')
         
-        G, lights = _get_graph()
+        compact, lights = _get_graph()
         
         # Recalculate business scores if departure_time provided
         if departure_time and _businesses_cache:
-            G = _recalculate_business_scores(G, _businesses_cache, departure_time)
+            _recalculate_business_scores_compact(compact, _businesses_cache, departure_time)
 
         # Build response with graph edges, lights, and bbox
-        edges_fc = graph_to_geojson(G)
+        edges_fc = graph_to_geojson(compact)
         lights_list = [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []
         response = {
             "bbox": list(BBOX),  # (north, south, east, west)
@@ -711,42 +886,45 @@ def api_graph_data_lite():
     
     try:
         print('[api] /api/graph-data-lite request received (building cache)')
-        G, lights = _get_graph()
+        compact, lights = _get_graph()
 
         # sample edges: take every Nth edge to keep payload small
-        total_edges = len(list(G.edges(keys=True)))
+        total_edges = len(compact.edge_u_idx)
         sample_interval = max(1, total_edges // 1000)  # aim for ~1000 edges
 
         features = []
         i = 0
-        for u, v, k, data in G.edges(keys=True, data=True):
+        for edge_idx in range(total_edges):
             if (i % sample_interval) != 0:
                 i += 1
                 continue
-            geom = data.get('geometry')
-            if geom is not None:
-                try:
-                    coords = [[round(float(x), 5), round(float(y), 5)] for x, y in geom.coords]
-                except Exception:
-                    coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+            start = int(compact.edge_geom_indptr[edge_idx])
+            end = int(compact.edge_geom_indptr[edge_idx + 1])
+            if end > start:
+                coords = [[round(float(x), 5), round(float(y), 5)] for x, y in zip(compact.edge_geom_x[start:end], compact.edge_geom_y[start:end])]
             else:
-                coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+                u_idx = int(compact.edge_u_idx[edge_idx])
+                v_idx = int(compact.edge_v_idx[edge_idx])
+                coords = [
+                    [round(float(compact.node_x[u_idx]), 5), round(float(compact.node_y[u_idx]), 5)],
+                    [round(float(compact.node_x[v_idx]), 5), round(float(compact.node_y[v_idx]), 5)]
+                ]
 
-            length_val = data.get('length', 0)
-            safety_val = data.get('safety_score', 100)
+            length_val = float(compact.edge_length[edge_idx])
+            safety_val = 100.0 - float(compact.edge_danger[edge_idx])
 
             features.append({
                 'type': 'Feature',
                 'geometry': {'type': 'LineString', 'coordinates': coords},
                 'properties': {
                     'safety_score': safety_val,
-                    'light_count': data.get('light_count', 0),
-                    'curve_score': data.get('curve_score', 0),
-                    'darkness_score': data.get('darkness_score', 0),
-                    'highway_risk': data.get('highway_risk', 1),
-                    'highway_tag': data.get('highway_tag', None),
-                    'land_risk': data.get('land_risk', 0.6),
-                    'land_label': data.get('land_label', 'Unknown')
+                    'light_count': int(compact.edge_light_count[edge_idx]) if compact.edge_light_count.size else 0,
+                    'curve_score': 0,
+                    'darkness_score': float(compact.edge_darkness_score[edge_idx]) if compact.edge_darkness_score.size else 0.0,
+                    'highway_risk': 1,
+                    'highway_tag': None,
+                    'land_risk': float(compact.edge_land_risk[edge_idx]) if compact.edge_land_risk.size else 0.6,
+                    'land_label': 'Unknown'
                 }
             })
             i += 1
@@ -778,35 +956,35 @@ def api_graph_summary():
     try:
         print('[api] /api/graph-summary request received')
 
-        G, lights = _get_graph()
+        compact, lights = _get_graph()
 
         # prepare a small preview of edges (no geometry), up to 50 entries
         preview = []
         max_preview = 50
-        for i, (u, v, k, data) in enumerate(G.edges(keys=True, data=True)):
+        for i in range(len(compact.edge_u_idx)):
             if i >= max_preview:
                 break
             # try to include simple ints for nodes; fallback to string if not castable
             try:
-                u_id = int(u)
+                u_id = int(compact.node_ids[int(compact.edge_u_idx[i])])
             except Exception:
-                u_id = str(u)
+                u_id = str(compact.node_ids[int(compact.edge_u_idx[i])])
             try:
-                v_id = int(v)
+                v_id = int(compact.node_ids[int(compact.edge_v_idx[i])])
             except Exception:
-                v_id = str(v)
+                v_id = str(compact.node_ids[int(compact.edge_v_idx[i])])
             preview.append({
                 'u': u_id, 'v': v_id,
-                'length': data.get('length', 0),
-                'safety_score': data.get('safety_score', 100),
-                'light_count': data.get('light_count', 0)
+                'length': float(compact.edge_length[i]),
+                'safety_score': 100.0 - float(compact.edge_danger[i]),
+                'light_count': int(compact.edge_light_count[i]) if compact.edge_light_count.size else 0
             })
 
         response = {
             'status': 'success',
             'bbox': list(BBOX),
-            'nodes': len(G.nodes()),
-            'edges': len(G.edges()),
+            'nodes': len(compact.node_ids),
+            'edges': len(compact.edge_u_idx),
             'lights': len(lights) if lights else 0,
             'preview_edges': preview
         }
@@ -821,26 +999,21 @@ def api_graph_summary():
 def api_sidewalks():
     """Return GeoJSON of streets with explicit sidewalk data from OSM."""
     try:
-        G, lights = _get_graph()
-        
+        compact, _ = _get_graph()
+
         features = []
-        for u, v, k, data in G.edges(keys=True, data=True):
-            # Only show sidewalks with explicit OSM tags
-            has_explicit = data.get('has_explicit_sidewalk', False)
-            sidewalk_score = data.get('sidewalk_score', 0.5)
-            
-            # Only include edges with explicit sidewalk data AND good sidewalk scores
+        for i in range(len(compact.edge_u_idx)):
+            has_explicit = bool(compact.edge_has_explicit_sidewalk[i]) if compact.edge_has_explicit_sidewalk.size else False
+            sidewalk_score = float(compact.edge_sidewalk[i]) if compact.edge_sidewalk.size else 0.0
+
             if has_explicit and sidewalk_score >= 0.8:
-                # Get edge geometry or fallback to node coordinates
-                geom = data.get('geometry')
-                if geom:
-                    coords = [[x, y] for x, y in geom.coords]
-                else:
-                    coords = [
-                        [G.nodes[u]['x'], G.nodes[u]['y']],
-                        [G.nodes[v]['x'], G.nodes[v]['y']]
-                    ]
-                
+                u_idx = int(compact.edge_u_idx[i])
+                v_idx = int(compact.edge_v_idx[i])
+                coords = [
+                    [float(compact.node_x[u_idx]), float(compact.node_y[u_idx])],
+                    [float(compact.node_x[v_idx]), float(compact.node_y[v_idx])]
+                ]
+
                 features.append({
                     'type': 'Feature',
                     'geometry': {
@@ -849,8 +1022,8 @@ def api_sidewalks():
                     },
                     'properties': {
                         'sidewalk_score': sidewalk_score,
-                        'sidewalk': data.get('sidewalk'),
-                        'highway': data.get('highway')
+                        'sidewalk': None,
+                        'highway': None
                     }
                 })
         
@@ -1078,20 +1251,19 @@ def api_routes():
                 "message": f"End location ({end_lat:.4f}, {end_lon:.4f}) is outside the service area. Please select a location within bounds."
             }), 400
         
-        # Get graph
-        G, lights = _get_graph()
-        compact = _get_compact_graph()
+        # Get compact graph + lights
+        compact, lights = _get_graph()
         
         # If departure_time is provided, recalculate business proximity scores
         # based on which businesses are actually open at that time
         if departure_time and _businesses_cache:
             print(f"  Recalculating business scores for departure_time: {departure_time}")
-            G = _recalculate_business_scores(G, _businesses_cache, departure_time)
+            _recalculate_business_scores_compact(compact, _businesses_cache, departure_time)
         
         # Snap to nearest nodes
         print(f"Snapping ({start_lat}, {start_lon}) and ({end_lat}, {end_lon}) to graph...")
-        start_node = snap_to_nearest_node(G, start_lat, start_lon)
-        end_node = snap_to_nearest_node(G, end_lat, end_lon)
+        start_node = snap_to_nearest_node(compact, start_lat, start_lon)
+        end_node = snap_to_nearest_node(compact, end_lat, end_lon)
         
         print(f"Start node: {start_node}, End node: {end_node}")
         
@@ -1160,13 +1332,13 @@ def api_routes():
         # Calculate walking metrics for both routes
         if fastest_route:
             fastest_metrics = calculate_route_walking_metrics(
-                fastest_route, G, lights, BBOX, compact_graph=compact, edge_indices=fastest_edge_indices
+                fastest_route, None, lights, BBOX, compact_graph=compact, edge_indices=fastest_edge_indices
             )
             fastest_data.update(fastest_metrics)
         
         if safest_route:
             safest_metrics = calculate_route_walking_metrics(
-                safest_route, G, lights, BBOX, compact_graph=compact, edge_indices=safest_edge_indices
+                safest_route, None, lights, BBOX, compact_graph=compact, edge_indices=safest_edge_indices
             )
             safest_data.update(safest_metrics)
         
@@ -1174,11 +1346,9 @@ def api_routes():
         fastest_geojson = None
         safest_geojson = None
         if fastest_route and fastest_edge_indices:
-            fastest_edge_keys = compact.edge_keys_for_path(fastest_edge_indices)
-            fastest_geojson = route_to_geojson(fastest_route, G, "fastest", edge_keys=fastest_edge_keys)
+            fastest_geojson = route_to_geojson(fastest_route, compact, "fastest", edge_indices=fastest_edge_indices)
         if safest_route and safest_edge_indices:
-            safest_edge_keys = compact.edge_keys_for_path(safest_edge_indices)
-            safest_geojson = route_to_geojson(safest_route, G, "safest", edge_keys=safest_edge_keys)
+            safest_geojson = route_to_geojson(safest_route, compact, "safest", edge_indices=safest_edge_indices)
         
         print(f"  fastest_route nodes: {len(fastest_route) if fastest_route else 0}, geojson: {fastest_geojson is not None}")
         print(f"  safest_route nodes: {len(safest_route) if safest_route else 0}, geojson: {safest_geojson is not None}")
@@ -1213,13 +1383,13 @@ def api_memory():
         process = psutil.Process(os.getpid())
         mem_info = process.memory_info()
         
-        # Calculate graph cache stats
-        graph_count = len(_graph_cache)
+        # Calculate compact graph cache stats
+        graph_count = len(_compact_graph_cache)
         total_nodes = 0
         total_edges = 0
-        for G, lights in _graph_cache.values():
-            total_nodes += len(G.nodes())
-            total_edges += len(G.edges())
+        for compact in _compact_graph_cache.values():
+            total_nodes += len(compact.node_ids)
+            total_edges += len(compact.edge_u_idx)
         
         return jsonify({
             "rss_mb": round(mem_info.rss / 1024 / 1024, 2),        # Resident Set Size (actual RAM)

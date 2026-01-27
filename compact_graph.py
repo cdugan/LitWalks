@@ -17,8 +17,18 @@ class CompactGraph:
     edge_danger: np.ndarray
     edge_sidewalk: np.ndarray
     edge_is_footpath: np.ndarray
+    edge_has_explicit_sidewalk: np.ndarray
     edge_business_score: np.ndarray
+    edge_business_count: np.ndarray
+    edge_light_count: np.ndarray
+    edge_darkness_score: np.ndarray
+    edge_land_risk: np.ndarray
+    edge_speed_risk: np.ndarray
+    edge_speed_kph: np.ndarray
     edge_optimized_weight: np.ndarray
+    edge_geom_indptr: np.ndarray
+    edge_geom_x: np.ndarray
+    edge_geom_y: np.ndarray
     edge_u_idx: np.ndarray
     edge_v_idx: np.ndarray
     edge_k: np.ndarray
@@ -110,8 +120,16 @@ def build_compact_graph(G) -> CompactGraph:
     danger_list = []
     sidewalk_list = []
     is_footpath_list = []
+    has_explicit_sidewalk_list = []
     business_score_list = []
+    business_count_list = []
+    light_count_list = []
+    darkness_score_list = []
+    land_risk_list = []
+    speed_risk_list = []
+    speed_kph_list = []
     optimized_weight_list = []
+    geom_coords_list = []
     edge_u_idx = []
     edge_v_idx = []
     edge_k_list = []
@@ -129,9 +147,32 @@ def build_compact_graph(G) -> CompactGraph:
         danger = float(data.get('danger_score', 50.0) or 0.0)
         sidewalk_score = float(data.get('sidewalk_score', 0.0) or 0.0)
         is_footpath = bool(data.get('is_footpath', sidewalk_score >= 0.99))
+        has_explicit_sidewalk = bool(data.get('has_explicit_sidewalk', False))
         business_score = float(data.get('business_score', 0.5) or 0.0)
+        business_count = int(data.get('business_count', 0) or 0)
+        light_count = int(data.get('light_count', 0) or 0)
+        darkness_score = float(data.get('darkness_score', 0.0) or 0.0)
+        land_risk = float(data.get('land_risk', 0.6) or 0.0)
+        speed_risk = float(data.get('speed_risk', 0.0) or 0.0)
+        speed_kph = float(data.get('speed_kph', 5.0) or 0.0)
 
         road_penalty = 1.0 if is_footpath else 10.0
+
+        geom = data.get('geometry')
+        coords = None
+        if geom is not None and hasattr(geom, 'coords'):
+            try:
+                coords = list(geom.coords)
+            except Exception:
+                coords = None
+        if not coords:
+            ux = G.nodes[u].get('x', 0.0)
+            uy = G.nodes[u].get('y', 0.0)
+            vx = G.nodes[v].get('x', 0.0)
+            vy = G.nodes[v].get('y', 0.0)
+            coords = [(ux, uy), (vx, vy)]
+
+        geom_coords_list.append([(float(x), float(y)) for x, y in coords])
 
         optimized_weight = data.get('optimized_weight', None)
         if optimized_weight is None:
@@ -148,7 +189,14 @@ def build_compact_graph(G) -> CompactGraph:
         danger_list.append(danger)
         sidewalk_list.append(sidewalk_score)
         is_footpath_list.append(is_footpath)
+        has_explicit_sidewalk_list.append(has_explicit_sidewalk)
         business_score_list.append(business_score)
+        business_count_list.append(business_count)
+        light_count_list.append(light_count)
+        darkness_score_list.append(darkness_score)
+        land_risk_list.append(land_risk)
+        speed_risk_list.append(speed_risk)
+        speed_kph_list.append(speed_kph)
         optimized_weight_list.append(optimized_weight)
         edge_u_idx.append(su)
         edge_v_idx.append(sv)
@@ -169,8 +217,18 @@ def build_compact_graph(G) -> CompactGraph:
             edge_danger=np.array([], dtype=np.float32),
             edge_sidewalk=np.array([], dtype=np.float32),
             edge_is_footpath=np.array([], dtype=bool),
+            edge_has_explicit_sidewalk=np.array([], dtype=bool),
             edge_business_score=np.array([], dtype=np.float32),
+            edge_business_count=np.array([], dtype=np.int16),
+            edge_light_count=np.array([], dtype=np.int16),
+            edge_darkness_score=np.array([], dtype=np.float32),
+            edge_land_risk=np.array([], dtype=np.float32),
+            edge_speed_risk=np.array([], dtype=np.float32),
+            edge_speed_kph=np.array([], dtype=np.float32),
             edge_optimized_weight=np.array([], dtype=np.float32),
+            edge_geom_indptr=np.zeros(1, dtype=np.int64),
+            edge_geom_x=np.array([], dtype=np.float32),
+            edge_geom_y=np.array([], dtype=np.float32),
             edge_u_idx=np.array([], dtype=np.int32),
             edge_v_idx=np.array([], dtype=np.int32),
             edge_k=np.array([], dtype=np.int32),
@@ -202,8 +260,29 @@ def build_compact_graph(G) -> CompactGraph:
     edge_danger = _reorder(danger_list, np.float32)
     edge_sidewalk = _reorder(sidewalk_list, np.float32)
     edge_is_footpath = _reorder(is_footpath_list, bool)
+    edge_has_explicit_sidewalk = _reorder(has_explicit_sidewalk_list, bool)
     edge_business_score = _reorder(business_score_list, np.float32)
+    edge_business_count = _reorder(business_count_list, np.int16)
+    edge_light_count = _reorder(light_count_list, np.int16)
+    edge_darkness_score = _reorder(darkness_score_list, np.float32)
+    edge_land_risk = _reorder(land_risk_list, np.float32)
+    edge_speed_risk = _reorder(speed_risk_list, np.float32)
+    edge_speed_kph = _reorder(speed_kph_list, np.float32)
     edge_optimized_weight = _reorder(optimized_weight_list, np.float32)
+    # Rebuild geometry arrays in sorted order
+    geom_indptr = [0]
+    geom_x_list = []
+    geom_y_list = []
+    for idx in order:
+        coords = geom_coords_list[int(idx)]
+        for x, y in coords:
+            geom_x_list.append(x)
+            geom_y_list.append(y)
+        geom_indptr.append(len(geom_x_list))
+
+    edge_geom_indptr = np.array(geom_indptr, dtype=np.int64)
+    edge_geom_x = np.array(geom_x_list, dtype=np.float32)
+    edge_geom_y = np.array(geom_y_list, dtype=np.float32)
     edge_u_idx = _reorder(edge_u_idx, np.int32)
     edge_v_idx = _reorder(edge_v_idx, np.int32)
     edge_k = _reorder(edge_k_list, np.int32)
@@ -221,8 +300,18 @@ def build_compact_graph(G) -> CompactGraph:
         edge_danger=edge_danger,
         edge_sidewalk=edge_sidewalk,
         edge_is_footpath=edge_is_footpath,
+        edge_has_explicit_sidewalk=edge_has_explicit_sidewalk,
         edge_business_score=edge_business_score,
+        edge_business_count=edge_business_count,
+        edge_light_count=edge_light_count,
+        edge_darkness_score=edge_darkness_score,
+        edge_land_risk=edge_land_risk,
+        edge_speed_risk=edge_speed_risk,
+        edge_speed_kph=edge_speed_kph,
         edge_optimized_weight=edge_optimized_weight,
+        edge_geom_indptr=edge_geom_indptr,
+        edge_geom_x=edge_geom_x,
+        edge_geom_y=edge_geom_y,
         edge_u_idx=edge_u_idx,
         edge_v_idx=edge_v_idx,
         edge_k=edge_k,
