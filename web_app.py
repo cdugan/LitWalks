@@ -11,13 +11,14 @@ from flask_cors import CORS
 import json
 import os
 import psutil
-import networkx as nx
+import numpy as np
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from route_visualizer import (
     geocode_address, snap_to_nearest_node, get_osrm_route, 
     snap_osrm_route_to_graph
 )
+from compact_graph import build_compact_graph
 
 # BBOX for default area
 # BBOX for default area (centralized in config)
@@ -259,66 +260,111 @@ def _recalculate_business_scores(G, businesses, departure_time):
     
     return G
 
-# --- Pre-built graph loading ---
+# --- Pre-built graph loading (lazy + compressed) ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
+_GRAPH_PREBUILT_FILE_GZ = 'graph_prebuilt.pkl.gz'
 _graph_cache = {}
+_compact_graph_cache = {}
 _businesses_cache = None
 _GRAPH_LOADED = False
 _GRAPH_LOAD_ERROR = None
 
 def _load_prebuilt_graph():
-    """Load the pre-built graph from pickle file."""
+    """Load the pre-built graph from pickle file (supports gzip compression)."""
     global _GRAPH_LOADED, _GRAPH_LOAD_ERROR, _businesses_cache
     import pickle
+    import gzip
     
-    if not os.path.exists(_GRAPH_PREBUILT_FILE):
-        _GRAPH_LOAD_ERROR = f"Pre-built graph file not found: {_GRAPH_PREBUILT_FILE}"
-        print(f"[startup] ERROR: {_GRAPH_LOAD_ERROR}")
-        print(f"[startup] Run 'python build_graph_offline.py' to generate it first.")
+    # Try compressed file first, then uncompressed
+    if os.path.exists(_GRAPH_PREBUILT_FILE_GZ):
+        graph_file = _GRAPH_PREBUILT_FILE_GZ
+        use_gzip = True
+    elif os.path.exists(_GRAPH_PREBUILT_FILE):
+        graph_file = _GRAPH_PREBUILT_FILE
+        use_gzip = False
+    else:
+        _GRAPH_LOAD_ERROR = f"Pre-built graph file not found: {_GRAPH_PREBUILT_FILE} or {_GRAPH_PREBUILT_FILE_GZ}"
+        print(f"[graph] ERROR: {_GRAPH_LOAD_ERROR}")
+        print(f"[graph] Run 'python build_graph_offline.py' to generate it first.")
         return False
     
     try:
-        print(f"[startup] Loading pre-built graph from {_GRAPH_PREBUILT_FILE}...")
+        print(f"[graph] Loading pre-built graph from {graph_file}...")
         start = time.time()
-        with open(_GRAPH_PREBUILT_FILE, 'rb') as f:
-            data = pickle.load(f)
-            # Handle both old and new pickle formats
-            if len(data) == 4:
-                G, lights, businesses, bbox = data
-                _businesses_cache = businesses
-            else:
-                G, lights, bbox = data
-                _businesses_cache = []
-        elapsed = time.time() - start
         
+        if use_gzip:
+            with gzip.open(graph_file, 'rb') as f:
+                data = pickle.load(f)
+        else:
+            with open(graph_file, 'rb') as f:
+                data = pickle.load(f)
+        
+        # Handle both old and new pickle formats
+        if len(data) == 4:
+            G, lights, businesses, bbox = data
+            _businesses_cache = businesses
+        else:
+            G, lights, bbox = data
+            _businesses_cache = []
+        
+        elapsed = time.time() - start
         _graph_cache[str(BBOX)] = (G, lights)
+        try:
+            compact_start = time.time()
+            compact = build_compact_graph(G)
+            _compact_graph_cache[str(BBOX)] = compact
+            compact_elapsed = time.time() - compact_start
+            print(f"[graph] Compact routing graph built in {compact_elapsed:.3f}s — nodes={len(compact.node_ids)} edges={len(compact.indices)}")
+        except Exception as cg_err:
+            print(f"[graph] WARNING: failed to build compact graph: {cg_err}")
         _GRAPH_LOADED = True
-        print(f"[startup] Graph loaded in {elapsed:.3f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0} businesses={len(_businesses_cache) if _businesses_cache else 0}")
+        
+        file_size = os.path.getsize(graph_file) / (1024 * 1024)
+        print(f"[graph] Graph loaded in {elapsed:.3f}s ({file_size:.1f}MB) — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0} businesses={len(_businesses_cache) if _businesses_cache else 0}")
         return True
     except Exception as e:
         _GRAPH_LOAD_ERROR = str(e)
-        print(f"[startup] ERROR loading graph: {e}")
+        print(f"[graph] ERROR loading graph: {e}")
         return False
 
-# Load graph immediately at import time (works for gunicorn workers too)
-_mem_before_graph = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-print(f"[startup] Memory before loading graph: {_mem_before_graph:.1f} MB")
-_load_prebuilt_graph()
-_mem_after_graph_load = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-print(f"[startup] Memory after loading graph: {_mem_after_graph_load:.1f} MB (D +{_mem_after_graph_load - _mem_before_graph:.1f} MB)")
+# Don't load graph at startup - load on first request to reduce memory footprint
+print(f"[startup] Graph will be loaded on first request (lazy loading enabled)")
 
 # --- GeoJSON response caching (deterministic output from fixed graph) ---
 _geojson_cache = {}  # Keys: 'graph-data', 'graph-data-lite'; Values: (geojson_dict, size_bytes)
 
 
 def _get_graph():
-    """Return the pre-loaded graph and lights; error if missing."""
+    """Return the pre-loaded graph and lights; load on-demand if needed."""
     if not _GRAPH_LOADED:
-        raise RuntimeError(f"Graph not loaded. Pre-built graph file missing or load failed: {_GRAPH_LOAD_ERROR}")
+        print("[graph] Lazy loading graph on first request...")
+        success = _load_prebuilt_graph()
+        if not success:
+            raise RuntimeError(f"Graph failed to load: {_GRAPH_LOAD_ERROR}")
+    
     bbox_key = str(BBOX)
     if bbox_key in _graph_cache:
         return _graph_cache[bbox_key]
     raise RuntimeError("Graph cache miss despite successful load (should not happen)")
+
+
+def _get_compact_graph():
+    """Return the compact routing graph; build on-demand if missing."""
+    if not _GRAPH_LOADED:
+        print("[graph] Lazy loading graph on first request...")
+        success = _load_prebuilt_graph()
+        if not success:
+            raise RuntimeError(f"Graph failed to load: {_GRAPH_LOAD_ERROR}")
+    bbox_key = str(BBOX)
+    if bbox_key in _compact_graph_cache:
+        return _compact_graph_cache[bbox_key]
+    # Fallback: build compact graph from cached NetworkX graph
+    if bbox_key in _graph_cache:
+        G, _ = _graph_cache[bbox_key]
+        compact = build_compact_graph(G)
+        _compact_graph_cache[bbox_key] = compact
+        return compact
+    raise RuntimeError("Compact graph cache miss despite successful load (should not happen)")
 
 
 def get_memory_usage():
@@ -431,6 +477,7 @@ def _warm_route_computation():
     """Prime a tiny route computation so first user request is fast."""
     try:
         G, _ = _get_graph()
+        compact = _get_compact_graph()
         try:
             u, v = next(iter(G.edges()))
         except StopIteration:
@@ -443,16 +490,15 @@ def _warm_route_computation():
         except Exception as warm_err:
             print(f"[startup] Route warm-up nearest-node skipped: {warm_err}")
 
-        # Run a quick shortest-path to warm NetworkX internals
+        # Run a quick shortest-path to warm routing internals
         try:
-            path = nx.shortest_path(
-                G,
-                u,
-                v,
-                weight=lambda _u, _v, data: data.get('travel_time', data.get('length', 1))
-            )
-            route_to_geojson(path, G, "warm")
-            print(f"[startup] Route warm-up complete: {len(path)} nodes")
+            path, edge_indices = compact.shortest_path(u, v, weight="fastest")
+            if path and edge_indices:
+                edge_keys = compact.edge_keys_for_path(edge_indices)
+                route_to_geojson(path, G, "warm", edge_keys=edge_keys)
+                print(f"[startup] Route warm-up complete: {len(path)} nodes")
+            else:
+                print("[startup] Route warm-up skipped: no path")
         except Exception as warm_path_err:
             print(f"[startup] Route warm-up path skipped: {warm_path_err}")
     except Exception as e:
@@ -521,7 +567,7 @@ def graph_to_geojson(G):
     }
 
 
-def route_to_geojson(route_nodes, G, route_type="fastest"):
+def route_to_geojson(route_nodes, G, route_type="fastest", edge_keys=None):
     """Convert a route (list of node IDs) to GeoJSON."""
     if not route_nodes or len(route_nodes) < 2:
         return None
@@ -536,9 +582,11 @@ def route_to_geojson(route_nodes, G, route_type="fastest"):
     
     try:
         # Build route coordinates by concatenating edge geometries when available
-        for i in range(len(route_nodes) - 1):
-            u, v = route_nodes[i], route_nodes[i + 1]
-            edge_data = G.edges[u, v, 0]
+        if edge_keys is None:
+            edge_keys = [(route_nodes[i], route_nodes[i + 1], 0) for i in range(len(route_nodes) - 1)]
+
+        for u, v, k in edge_keys:
+            edge_data = G.edges[u, v, k]
             properties["length"] += edge_data.get('length', 0)
             properties["travel_time"] += edge_data.get('travel_time', 0)
             properties["safety_score"] += edge_data.get('safety_score', 100)
@@ -858,14 +906,16 @@ def api_businesses():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
+def calculate_route_walking_metrics(route_nodes, G, lights, bbox, compact_graph=None, edge_indices=None):
     """Calculate walking-specific metrics for a route.
     
     Args:
         route_nodes: List of node IDs forming the route
-        G: NetworkX graph
+        G: NetworkX graph (optional if compact_graph provided)
         lights: List of streetlight locations [(lat, lon), ...]
         bbox: Bounding box tuple (north, south, east, west)
+        compact_graph: CompactGraph instance for fast metrics
+        edge_indices: List of edge indices aligned to the route
     
     Returns:
         Dict with lighting_score, footpath_coverage, nearby_businesses
@@ -888,10 +938,18 @@ def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
             for i in range(len(route_nodes) - 1):
                 node1 = route_nodes[i]
                 node2 = route_nodes[i + 1]
-                
+
                 # Get node coordinates
-                lat1, lon1 = G.nodes[node1]['y'], G.nodes[node1]['x']
-                lat2, lon2 = G.nodes[node2]['y'], G.nodes[node2]['x']
+                if compact_graph is not None:
+                    idx1 = compact_graph.node_id_to_idx.get(node1)
+                    idx2 = compact_graph.node_id_to_idx.get(node2)
+                    if idx1 is None or idx2 is None:
+                        continue
+                    lat1, lon1 = compact_graph.node_y[idx1], compact_graph.node_x[idx1]
+                    lat2, lon2 = compact_graph.node_y[idx2], compact_graph.node_x[idx2]
+                else:
+                    lat1, lon1 = G.nodes[node1]['y'], G.nodes[node1]['x']
+                    lat2, lon2 = G.nodes[node2]['y'], G.nodes[node2]['x']
                 
                 # Check if any streetlights are near this segment (within ~100 meters)
                 segment_midpoint_lat = (lat1 + lat2) / 2
@@ -916,13 +974,18 @@ def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
             for i in range(len(route_nodes) - 1):
                 node1 = route_nodes[i]
                 node2 = route_nodes[i + 1]
-                
+
                 try:
-                    # Handle MultiGraph edges - access edge 0
-                    edge_data = G.edges[node1, node2, 0]
-                    if edge_data.get('is_footpath', False):
-                        footpath_segments += 1
-                except:
+                    if compact_graph is not None and edge_indices is not None:
+                        edge_idx = edge_indices[i]
+                        if compact_graph.edge_is_footpath[edge_idx]:
+                            footpath_segments += 1
+                    else:
+                        # Handle MultiGraph edges - access edge 0
+                        edge_data = G.edges[node1, node2, 0]
+                        if edge_data.get('is_footpath', False):
+                            footpath_segments += 1
+                except Exception:
                     pass
             
             metrics["footpath_coverage"] = round((footpath_segments / total_segments) * 100, 1)
@@ -933,12 +996,18 @@ def calculate_route_walking_metrics(route_nodes, G, lights, bbox):
             node1 = route_nodes[i]
             node2 = route_nodes[i + 1]
             try:
-                edge_data = G.edges[node1, node2, 0]
-                if 'business_score' in edge_data:
-                    biz_score = edge_data['business_score']
+                if compact_graph is not None and edge_indices is not None:
+                    edge_idx = edge_indices[i]
+                    biz_score = compact_graph.edge_business_score[edge_idx]
                     if biz_score and biz_score > 0:
                         nearby_businesses += 1
-            except:
+                else:
+                    edge_data = G.edges[node1, node2, 0]
+                    if 'business_score' in edge_data:
+                        biz_score = edge_data['business_score']
+                        if biz_score and biz_score > 0:
+                            nearby_businesses += 1
+            except Exception:
                 pass
         
         metrics["nearby_businesses"] = nearby_businesses
@@ -1011,6 +1080,7 @@ def api_routes():
         
         # Get graph
         G, lights = _get_graph()
+        compact = _get_compact_graph()
         
         # If departure_time is provided, recalculate business proximity scores
         # based on which businesses are actually open at that time
@@ -1049,145 +1119,66 @@ def api_routes():
             "nearby_businesses": None
         }
         
-        # Helper: normalize edge data from MultiGraph (may be nested dict) to flat dict
-        def normalize_edge_data(data_attr):
-            """Handle both flat dict and nested MultiGraph dict formats."""
-            if isinstance(data_attr, dict):
-                # Check if it's nested (has integer keys like 0, 1, ...)
-                first_key = next(iter(data_attr), None)
-                if isinstance(first_key, int) and isinstance(data_attr.get(first_key), dict):
-                    # Nested: extract first edge
-                    return data_attr[first_key]
-                elif 'osmid' in data_attr or 'length' in data_attr:
-                    # Already flat
-                    return data_attr
-            return {}
-        
-        print("Computing fastest and safest routes...")
+        print("Computing fastest and safest routes (compact graph)...")
         try:
-            # Precompute normalization factors for consistent weighting
-            times = [d.get('travel_time', 0) for u, v, k, d in G.edges(keys=True, data=True)]
-            lengths = [d.get('length', 1) for u, v, k, d in G.edges(keys=True, data=True)]
-            safeties = [d.get('safety_score', 100) for u, v, k, d in G.edges(keys=True, data=True)]
-            max_time = max(times) if times else 1.0
-            max_length = max(lengths) if lengths else 1.0
-            max_safety = max(safeties) if safeties else 100.0
-            
-            print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
-
-            # Track some weights for debugging
-            debug_weights = []
-
-            def fastest_weight(u, v, data_attr):
-                data = normalize_edge_data(data_attr)
-                
-                # Check if optimized_weight exists, if not calculate it
-                if 'optimized_weight' not in data:
-                    # Calculate on the fly using the same formula as graph_builder
-                    travel_time = data.get('travel_time', 1)
-                    danger = data.get('danger_score', 50)
-                    sidewalk_score = data.get('sidewalk_score', 0)
-                    is_footpath = (sidewalk_score >= 0.99)
-                    road_penalty = 1.0 if is_footpath else 10.0
-                    safety_for_routing = 100.0 - danger
-                    weight = travel_time * road_penalty / (safety_for_routing + 0.01)
-                else:
-                    weight = data['optimized_weight']
-                
-                # Debug log first few edges
-                if len(debug_weights) < 10:
-                    highway = data.get('highway', 'unknown')
-                    danger = data.get('danger_score', 0)
-                    is_footpath = data.get('is_footpath', False)
-                    sidewalk = data.get('sidewalk_score', 0)
-                    has_opt = 'optimized_weight' in data
-                    debug_weights.append(f"  Edge {u}->{v}: hw={highway}, footpath={is_footpath}, sidewalk={sidewalk:.1f}, danger={danger:.1f}, opt_weight={weight:.2f}, had_opt={has_opt}")
-                
-                return weight
-            
-            def safest_weight(u, v, data_attr):
-                data = normalize_edge_data(data_attr)
-                length = data.get('length', 1)
-                danger = data.get('danger_score', 50)
-                
-                # Apply 10x penalty to roads (not footpaths) for safest route too
-                sidewalk_score = data.get('sidewalk_score', 0)
-                is_footpath = (sidewalk_score >= 0.99)
-                road_penalty = 1.0 if is_footpath else 10.0
-                
-                # Weight = danger * length * road_penalty
-                # Lower danger = lower weight = preferred
-                # Footpaths get 1x, roads get 10x multiplier
-                return danger * length * road_penalty
-            
             # Compute fastest route
-            print("  Computing fastest route (pure time)...")
-            print("\n  Sample edge weights:")
-            for dbg in debug_weights[:10]:
-                print(dbg)
-            try:
-                fastest_route = nx.shortest_path(G, start_node, end_node, weight=fastest_weight)
+            print("  Computing fastest route (compact)...")
+            fastest_route, fastest_edge_indices = compact.shortest_path(start_node, end_node, weight="fastest")
+            if fastest_route and fastest_edge_indices:
                 fastest_data["nodes"] = fastest_route
-                fastest_data["distance_m"] = sum(
-                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 0)
-                    for i in range(len(fastest_route) - 1)
-                )
-                fastest_data["travel_time_s"] = sum(
-                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('travel_time', 0)
-                    for i in range(len(fastest_route) - 1)
-                )
+                edge_idx = np.array(fastest_edge_indices, dtype=np.int64)
+                fastest_data["distance_m"] = float(compact.edge_length[edge_idx].sum())
+                fastest_data["travel_time_s"] = float(compact.edge_travel_time[edge_idx].sum())
                 if fastest_data["travel_time_s"] > 0:
                     fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
-                fastest_data["safety_score"] = sum(
-                    (
-                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('safety_score', 100)
-                        * (G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 1) / 1000.0)
-                    )
-                    for i in range(len(fastest_route) - 1)
-                )
+                safety = 100.0 - compact.edge_danger[edge_idx]
+                fastest_data["safety_score"] = float((safety * (compact.edge_length[edge_idx] / 1000.0)).sum())
                 print(f"  Fastest route: {len(fastest_route)} nodes, {fastest_data['travel_time_s']:.0f}s, safety_score={fastest_data['safety_score']:.1f}")
-            except nx.NetworkXNoPath:
+            else:
+                fastest_edge_indices = None
                 print("  No fastest path found!")
-            
-            # Compute safest route
-            print("  Computing safest route (pure safety)...")
-            try:
-                safest_route = nx.shortest_path(G, start_node, end_node, weight=safest_weight)
-                safest_data["nodes"] = safest_route
-                safest_data["distance_m"] = sum(
-                    G.edges[safest_route[i], safest_route[i+1], 0].get('length', 0)
-                    for i in range(len(safest_route) - 1)
-                )
-                safest_data["travel_time_s"] = sum(
-                    G.edges[safest_route[i], safest_route[i+1], 0].get('travel_time', 0)
-                    for i in range(len(safest_route) - 1)
-                )
-                safest_data["safety_score"] = sum(
-                    (
-                        G.edges[safest_route[i], safest_route[i+1], 0].get('safety_score', 100)
-                        * (G.edges[safest_route[i], safest_route[i+1], 0].get('length', 1) / 1000.0)
-                    )
-                    for i in range(len(safest_route) - 1)
-                )
-                print(f"  Safest route: {len(safest_route)} nodes, {safest_data['travel_time_s']:.0f}s, safety_score={safest_data['safety_score']:.1f}")
-            except nx.NetworkXNoPath:
-                print("  No safest path found!")
 
-        except nx.NetworkXNoPath:
-            print("  No path found!")
+            # Compute safest route
+            print("  Computing safest route (compact)...")
+            safest_route, safest_edge_indices = compact.shortest_path(start_node, end_node, weight="safest")
+            if safest_route and safest_edge_indices:
+                safest_data["nodes"] = safest_route
+                edge_idx = np.array(safest_edge_indices, dtype=np.int64)
+                safest_data["distance_m"] = float(compact.edge_length[edge_idx].sum())
+                safest_data["travel_time_s"] = float(compact.edge_travel_time[edge_idx].sum())
+                safety = 100.0 - compact.edge_danger[edge_idx]
+                safest_data["safety_score"] = float((safety * (compact.edge_length[edge_idx] / 1000.0)).sum())
+                print(f"  Safest route: {len(safest_route)} nodes, {safest_data['travel_time_s']:.0f}s, safety_score={safest_data['safety_score']:.1f}")
+            else:
+                safest_edge_indices = None
+                print("  No safest path found!")
+        except Exception as route_err:
+            fastest_edge_indices = None
+            safest_edge_indices = None
+            print(f"  Routing error: {route_err}")
         
         # Calculate walking metrics for both routes
         if fastest_route:
-            fastest_metrics = calculate_route_walking_metrics(fastest_route, G, lights, BBOX)
+            fastest_metrics = calculate_route_walking_metrics(
+                fastest_route, G, lights, BBOX, compact_graph=compact, edge_indices=fastest_edge_indices
+            )
             fastest_data.update(fastest_metrics)
         
         if safest_route:
-            safest_metrics = calculate_route_walking_metrics(safest_route, G, lights, BBOX)
+            safest_metrics = calculate_route_walking_metrics(
+                safest_route, G, lights, BBOX, compact_graph=compact, edge_indices=safest_edge_indices
+            )
             safest_data.update(safest_metrics)
         
         # Convert routes to GeoJSON
-        fastest_geojson = route_to_geojson(fastest_route, G, "fastest") if fastest_route else None
-        safest_geojson = route_to_geojson(safest_route, G, "safest") if safest_route else None
+        fastest_geojson = None
+        safest_geojson = None
+        if fastest_route and fastest_edge_indices:
+            fastest_edge_keys = compact.edge_keys_for_path(fastest_edge_indices)
+            fastest_geojson = route_to_geojson(fastest_route, G, "fastest", edge_keys=fastest_edge_keys)
+        if safest_route and safest_edge_indices:
+            safest_edge_keys = compact.edge_keys_for_path(safest_edge_indices)
+            safest_geojson = route_to_geojson(safest_route, G, "safest", edge_keys=safest_edge_keys)
         
         print(f"  fastest_route nodes: {len(fastest_route) if fastest_route else 0}, geojson: {fastest_geojson is not None}")
         print(f"  safest_route nodes: {len(safest_route) if safest_route else 0}, geojson: {safest_geojson is not None}")
