@@ -1,5 +1,6 @@
 import psutil
 import os
+import pickle
 
 # Memory tracking helper (define early so we can use it during imports)
 def _get_mem_mb():
@@ -808,3 +809,23 @@ def build_safe_graph(bbox):
     print(f"   ✓ Build complete [final mem: {mem_final:.1f} MB, total Δ +{mem_final - mem_start:.1f} MB]")
     
     return G_latlon, lights_latlon, businesses
+
+
+if __name__ == '__main__':
+    # Running this file directly should build the graph and show full debug output
+    print("[graph_builder] Running build_safe_graph()...")
+    try:
+        G_latlon, lights_latlon, businesses = build_safe_graph(BBOX)
+        output_file = 'graph_prebuilt.pkl'
+        print(f"[graph_builder] Saving to {output_file}...")
+        with open(output_file, 'wb') as f:
+            pickle.dump((G_latlon, lights_latlon, businesses, BBOX), f)
+        print("[graph_builder] Save complete.")
+        print(
+            f"[graph_builder] Done. nodes={len(G_latlon.nodes())} edges={len(G_latlon.edges())} "
+            f"lights={len(lights_latlon) if lights_latlon else 0} "
+            f"businesses={len(businesses) if businesses else 0}"
+        )
+    except Exception as e:
+        print(f"[graph_builder] ERROR: {e}")
+        raise

@@ -368,9 +368,9 @@ def fetch_google_places_businesses(bbox, api_key, radius_m=400, min_reviews=25, 
     if not SKIP_PLACES_CACHE and bbox_key in cache:
         cached_time = cache[bbox_key].get('timestamp', 0)
         cached_businesses = cache[bbox_key].get('businesses', [])
-        # Cache for 24 hours (only query Places API once per day, minimizes quota usage)
+        # Cache for 7 days (only query Places API once per week, minimizes quota usage)
         # But skip cache if it has 0 businesses (likely a previous API error)
-        if time.time() - cached_time < 86400 and len(cached_businesses) > 0:
+        if time.time() - cached_time < 604800 and len(cached_businesses) > 0:
             print(f"   ✓ Using cached Google Places data ({len(cached_businesses)} businesses, {int((time.time() - cached_time)/3600)}h old)")
             return cached_businesses
         elif len(cached_businesses) == 0:
