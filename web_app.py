@@ -413,18 +413,31 @@ def _recalculate_business_scores_compact(compact, businesses, departure_time):
 
     return compact
 
+
+def _maybe_recalculate_business_scores_compact(compact, businesses, departure_time):
+    """Recalculate business scores only when the departure_time changes."""
+    global _last_business_scores_key
+    if not departure_time or not businesses:
+        return
+    key = (str(BBOX), departure_time)
+    if _last_business_scores_key == key:
+        return
+    _recalculate_business_scores_compact(compact, businesses, departure_time)
+    _last_business_scores_key = key
+
 # --- Pre-built graph loading (lazy + compressed) ---
 _GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
 _GRAPH_PREBUILT_FILE_GZ = 'graph_prebuilt.pkl.gz'
 _compact_graph_cache = {}
 _lights_cache = {}
 _businesses_cache = None
+_last_business_scores_key = None
 _GRAPH_LOADED = False
 _GRAPH_LOAD_ERROR = None
 
 def _load_prebuilt_graph():
     """Load the pre-built graph from pickle file (supports gzip compression)."""
-    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR, _businesses_cache
+    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR, _businesses_cache, _last_business_scores_key
     import pickle
     import gzip
     
@@ -471,6 +484,7 @@ def _load_prebuilt_graph():
         except Exception as cg_err:
             print(f"[graph] WARNING: failed to build compact graph: {cg_err}")
         _GRAPH_LOADED = True
+        _last_business_scores_key = None
 
         # Release NetworkX graph to reduce memory footprint
         try:
@@ -743,6 +757,7 @@ def route_to_geojson(route_nodes, compact, route_type="fastest", edge_indices=No
         "travel_time": 0,
         "safety_score": 0
     }
+    safety_weighted_sum = 0.0
     
     try:
         if edge_indices is None:
@@ -758,10 +773,11 @@ def route_to_geojson(route_nodes, compact, route_type="fastest", edge_indices=No
 
             edge_idx = edge_indices[i] if i < len(edge_indices) else None
             if edge_idx is not None:
-                properties["length"] += float(compact.edge_length[edge_idx])
+                edge_length = float(compact.edge_length[edge_idx])
+                properties["length"] += edge_length
                 properties["travel_time"] += float(compact.edge_travel_time[edge_idx])
                 safety = 100.0 - float(compact.edge_danger[edge_idx])
-                properties["safety_score"] += safety
+                safety_weighted_sum += safety * edge_length
 
                 start = int(compact.edge_geom_indptr[edge_idx])
                 end = int(compact.edge_geom_indptr[edge_idx + 1])
@@ -788,6 +804,9 @@ def route_to_geojson(route_nodes, compact, route_type="fastest", edge_indices=No
     except Exception as e:
         print(f"Error building route GeoJSON: {e}")
         return None
+
+    if properties["length"] > 0:
+        properties["safety_score"] = safety_weighted_sum / properties["length"]
     
     return {
         "type": "Feature",
@@ -840,7 +859,7 @@ def api_graph_data():
         
         # Recalculate business scores if departure_time provided
         if departure_time and _businesses_cache:
-            _recalculate_business_scores_compact(compact, _businesses_cache, departure_time)
+            _maybe_recalculate_business_scores_compact(compact, _businesses_cache, departure_time)
 
         # Build response with graph edges, lights, and bbox
         edges_fc = graph_to_geojson(compact)
@@ -1258,7 +1277,7 @@ def api_routes():
         # based on which businesses are actually open at that time
         if departure_time and _businesses_cache:
             print(f"  Recalculating business scores for departure_time: {departure_time}")
-            _recalculate_business_scores_compact(compact, _businesses_cache, departure_time)
+            _maybe_recalculate_business_scores_compact(compact, _businesses_cache, departure_time)
         
         # Snap to nearest nodes
         print(f"Snapping ({start_lat}, {start_lon}) and ({end_lat}, {end_lon}) to graph...")
@@ -1304,7 +1323,11 @@ def api_routes():
                 if fastest_data["travel_time_s"] > 0:
                     fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
                 safety = 100.0 - compact.edge_danger[edge_idx]
-                fastest_data["safety_score"] = float((safety * (compact.edge_length[edge_idx] / 1000.0)).sum())
+                total_length = float(compact.edge_length[edge_idx].sum())
+                if total_length > 0:
+                    fastest_data["safety_score"] = float((safety * compact.edge_length[edge_idx]).sum() / total_length)
+                else:
+                    fastest_data["safety_score"] = 0.0
                 print(f"  Fastest route: {len(fastest_route)} nodes, {fastest_data['travel_time_s']:.0f}s, safety_score={fastest_data['safety_score']:.1f}")
             else:
                 fastest_edge_indices = None
@@ -1319,7 +1342,11 @@ def api_routes():
                 safest_data["distance_m"] = float(compact.edge_length[edge_idx].sum())
                 safest_data["travel_time_s"] = float(compact.edge_travel_time[edge_idx].sum())
                 safety = 100.0 - compact.edge_danger[edge_idx]
-                safest_data["safety_score"] = float((safety * (compact.edge_length[edge_idx] / 1000.0)).sum())
+                total_length = float(compact.edge_length[edge_idx].sum())
+                if total_length > 0:
+                    safest_data["safety_score"] = float((safety * compact.edge_length[edge_idx]).sum() / total_length)
+                else:
+                    safest_data["safety_score"] = 0.0
                 print(f"  Safest route: {len(safest_route)} nodes, {safest_data['travel_time_s']:.0f}s, safety_score={safest_data['safety_score']:.1f}")
             else:
                 safest_edge_indices = None

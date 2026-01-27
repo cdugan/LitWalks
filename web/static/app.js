@@ -11,6 +11,7 @@ let lightsLayer;
 let businessesLayer = null;
 let boundaryBox; // boundary rectangle layer
 let mapClickMode = null; // 'start' or 'end' for map picking mode
+let graphTimeFilterEnabled = false; // only apply departure_time to graph after user changes it
 const BBOX = window.APP_BBOX || [35.42, 35.28, -82.40, -82.55]; // [north, south, east, west] - fallback to Hendersonville if not set
 
 // Zoom level thresholds for detail layers
@@ -396,8 +397,8 @@ async function loadGraphData() {
                 console.error('Error loading initial businesses:', businessErr);
             }
 
-            // Load full graph in background
-            loadFullGraph();
+            // Load full graph in background (no time filter on first load)
+            loadFullGraph(false);
             
             console.log('Graph data loaded successfully');
         }
@@ -408,10 +409,10 @@ async function loadGraphData() {
 }
 
 // Load full graph with optional departure time
-async function loadFullGraph() {
+async function loadFullGraph(useTimeFilter = graphTimeFilterEnabled) {
     const departureTimeInput = document.getElementById('departureTimeInput');
     let url = '/api/graph-data';
-    if (departureTimeInput && departureTimeInput.value) {
+    if (useTimeFilter && departureTimeInput && departureTimeInput.value) {
         const departureTime = datetimeLocalToISO(departureTimeInput.value);
         url += `?departure_time=${encodeURIComponent(departureTime)}`;
         console.log(`Loading full graph for time: ${departureTime}`);
@@ -1011,9 +1012,10 @@ document.addEventListener('DOMContentLoaded', function() {
     if (departureTimeInput) {
         departureTimeInput.addEventListener('change', async function() {
             console.log('Departure time changed, reloading data...');
+            graphTimeFilterEnabled = true;
             
             // Reload graph with recalculated business proximity scores
-            await loadFullGraph();
+            await loadFullGraph(true);
             
             // Reload businesses if toggle is on (even if previous layer was empty)
             if (businessesToggle && businessesToggle.checked) {
